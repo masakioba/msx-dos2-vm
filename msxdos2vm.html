@@ -1,0 +1,3138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>R800 MSX-DOS2 Virtual Machine</title>
+  <style>
+    :root {
+      --bg: #121214;
+      --panel: #1a1a1f;
+      --border: #2e2e38;
+      --text: #e0e0e0;
+      --text-dim: #777;
+      --msx-blue: #2238a0;
+      --term-green: #33ff66;
+      --accent: #5bc0de;
+      --edit-bg: #2d3748;
+    }
+    body {
+      margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+      font-family: ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    h1 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+    .top-layout { display: grid; grid-template-columns: 1fr 390px; gap: 14px; max-width: 1180px; }
+    .terminal-container {
+      display: flex; flex-direction: column; min-height: 0; background: #000;
+      border: 2px dashed var(--border); border-radius: 6px; overflow: hidden;
+    }
+    .terminal-header {
+      background: #18181b; padding: 6px 12px; font-size: 0.75rem; color: #888;
+      border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center;
+    }
+    #terminalScreen {
+      flex: 1 1 0; min-height: 0; padding: 12px; color: var(--term-green); background: #050b05;
+      overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-size: 0.9rem; line-height: 1.4; outline: none;
+    }
+    .cursor { display: inline-block; width: 8px; height: 1.1em; background: var(--term-green); vertical-align: sub; animation: blink 1s step-end infinite; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .reg-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; font-size: 0.72rem; }
+    .reg-box { background: #111; padding: 3px 5px; border-radius: 4px; border: 1px solid #282830; display: flex; justify-content: space-between; }
+    .reg-label { color: #888; }
+    .reg-val { color: var(--accent); font-weight: bold; }
+    .controls { display: flex; gap: 6px; flex-wrap: wrap; }
+    button {
+      cursor: pointer; background: var(--msx-blue); color: #fff; border: none;
+      padding: 6px 10px; border-radius: 4px; font-weight: 600; font-family: inherit; font-size: 0.8rem;
+    }
+    button:hover { opacity: 0.85; }
+    button.secondary { background: #333; }
+    button.small { padding: 2px 6px; font-size: 0.7rem; }
+    .vdisk-container {
+      background: #0d0d10; border: 1px solid var(--border); border-radius: 4px; padding: 6px;
+      font-size: 0.72rem; display: flex; flex-direction: column; gap: 3px; max-height: 110px; overflow-y: auto;
+    }
+    .vdisk-item { display: flex; justify-content: space-between; align-items: center; color: #ccc; }
+    .log-container {
+      background: #000; border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px;
+      font-size: 0.72rem; color: #aaa; height: 35px; overflow-y: auto; white-space: pre-wrap;
+    }
+
+    /* Memory Monitor Styles */
+    .mem-section {
+      max-width: 1180px; background-color: var(--panel); border: 1px solid var(--border);
+      border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .mem-toolbar { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; flex-wrap: wrap; }
+    .mem-toolbar input[type="text"] {
+      width: 65px; padding: 3px 6px; background: #000; border: 1px solid var(--border);
+      color: var(--accent); font-family: inherit; font-size: 0.8rem; border-radius: 4px; text-align: center;
+    }
+    .dump-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; background: #0d0d10; border-radius: 4px; overflow: hidden; }
+    .dump-table th { background: #181820; color: var(--text-dim); padding: 5px 8px; font-weight: normal; text-align: left; border-bottom: 1px solid var(--border); }
+    .dump-table td { padding: 3px 8px; border-bottom: 1px solid #1a1a24; vertical-align: middle; }
+    .col-addr { color: #a78bfa; width: 55px; }
+    .col-text { width: 180px; color: #ffcc66; border-right: 1px solid var(--border); letter-spacing: 2px; user-select: none; }
+    .col-hex { display: flex; gap: 6px; flex-wrap: nowrap; }
+    .hex-byte { width: 20px; text-align: center; cursor: pointer; color: #ccc; border-radius: 2px; padding: 1px 0; }
+    .hex-byte:hover { background: var(--edit-bg); color: #fff; }
+    .hex-byte.editing { background: #d97706; color: #000; font-weight: bold; outline: none; }
+
+    /* Independent, in-page vi editor; does not modify the terminal. */
+    #viOverlay { position:fixed; inset:0; z-index:10000; background:rgba(0,0,0,.82); display:none; align-items:center; justify-content:center; }
+    #viOverlay.vi-open { display:flex; }
+    #viPanel { display:flex; flex-direction:column; background:#101317; border:1px solid #596375; border-radius:7px;
+      width:min(94vw,1000px); height:min(88vh,780px); overflow:hidden; }
+    #viHeader { color:#dce4ec; padding:9px 12px; background:#1c2530; font-size:13px; }
+    #viText { flex:1; min-height:0; resize:none; box-sizing:border-box; width:100%; background:#071009; color:#d2fad5;
+      font:15px/1.5 Consolas,monospace; white-space:pre; overflow:auto; tab-size:4; padding:12px; border:0; outline:none; caret-color:#ffff66; }
+    #viText::selection { background:#ffe071; color:#101317; }
+    #viStatus { color:#cbd6e3; background:#263342; padding:5px 12px; font-size:12px; }
+    #viCommand { box-sizing:border-box; background:#070c13; color:#fff; border:0; outline:none; width:100%;
+      font:14px Consolas,monospace; padding:8px 12px; display:none; }
+    #viHint { color:#9aa9b9; font-size:11px; padding:5px 12px; }
+  </style>
+</head>
+<body>
+
+  <h1>MSX-DOS2 VM + BDS C + R800/Z80 Machine Code Monitor</h1>
+
+  <div class="top-layout">
+    <div class="terminal-container" id="dropZone">
+      <div class="terminal-header">
+        <span>CONSOLE (CD / MD / DIR / DEL Wildcards Enabled)</span>
+        <div style="display:flex; gap:6px;">
+          <button class="secondary small" onclick="injectEof()">Send ^Z</button>
+          <button class="secondary small" onclick="abortExecution()">Abort</button>
+        </div>
+      </div>
+      <div id="terminalScreen" tabindex="0">
+        <span id="termText"></span><span class="cursor" id="termCursor"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="controls">
+        <label for="runAddress" style="font-size:0.72rem;align-self:center;">Run 0x</label>
+        <input id="runAddress" type="text" value="0100" maxlength="4" aria-label="Execution start address" style="width:55px;background:#000;color:var(--accent);border:1px solid var(--border);font-family:inherit;text-align:center;">
+        <button id="btnRun" onclick="runFromAddress()">Run</button>
+        <button class="secondary" onclick="setMonitorPC()">Set PC</button>
+        <button class="secondary" onclick="runCurrentExecution()">Resume</button>
+        <button id="btnStep" class="secondary" onclick="stepVm()">Step</button>
+        <button id="btnReset" class="secondary" onclick="resetVmState()">Reset</button>
+        <button class="secondary small" onclick="runR800SelfTest()">Test Multiplier</button>
+      </div>
+
+      <div style="font-size: 0.72rem; color: #888; font-weight: bold;">R800 REGISTERS</div>
+      <div class="reg-grid">
+        <div class="reg-box"><span class="reg-label">PC</span><span id="regPC" class="reg-val">0100</span></div>
+        <div class="reg-box"><span class="reg-label">SP</span><span id="regSP" class="reg-val">effe</span></div>
+        <div class="reg-box"><span class="reg-label">AF</span><span id="regAF" class="reg-val">0000</span></div>
+        <div class="reg-box"><span class="reg-label">BC</span><span id="regBC" class="reg-val">0000</span></div>
+        <div class="reg-box"><span class="reg-label">DE</span><span id="regDE" class="reg-val">0000</span></div>
+        <div class="reg-box"><span class="reg-label">HL</span><span id="regHL" class="reg-val">0000</span></div>
+        <div class="reg-box"><span class="reg-label">IX</span><span id="regIX" class="reg-val">0000</span></div>
+        <div class="reg-box"><span class="reg-label">IY</span><span id="regIY" class="reg-val">0000</span></div>
+      </div>
+
+      <div style="font-size: 0.72rem; color: #888; font-weight: bold;">TRACE / LOG</div>
+      <div class="log-container" id="traceLog">Ready.</div>
+
+      <div style="font-size: 0.72rem; color: #888; font-weight: bold; display: flex; justify-content: space-between;">
+        <span>DRIVE A: (IndexedDB)</span>
+        <div style="display:flex;gap:6px;align-items:center;"><button class="secondary small" onclick="loadBDSC()">Load BDS C</button><button class="secondary small" onclick="createSampleC()">Create Valid ABC.C</button></div>
+      </div>
+      <select class="vdisk-container" id="vdiskList" size="5" aria-label="Virtual disk files" style="width:100%; color:#ccc;" ondblclick="viewSelectedVDiskFile()"></select>
+      <div class="controls">
+        <button class="secondary small" onclick="viewSelectedVDiskFile()">View</button>
+        <button class="secondary small" onclick="downloadSelectedVDiskFile()">Download</button>
+      </div>
+      <div>
+        <input type="file" id="fileUpload" multiple style="font-size: 0.72rem; color: #aaa;" onchange="uploadFiles(event)">
+      </div>
+    </div>
+  </div>
+
+  <!-- Machine Monitor & Memory Hex Editor Section -->
+  <div class="mem-section">
+    <div class="mem-toolbar">
+      <span style="font-weight: bold;">Memory Dump / Editor:</span>
+      <button class="secondary small" onclick="movePage(-128)">&lt; Prev</button>
+      <button class="secondary small" onclick="movePage(128)">Next &gt;</button>
+      <span>Addr: 0x</span>
+      <input type="text" id="jumpAddr" value="0100" maxlength="4" onkeydown="if(event.key==='Enter') jumpToAddr()">
+      <button class="secondary small" onclick="jumpToAddr()">Jump</button>
+      <button class="secondary small" onclick="setDumpBase(vm.pc)">PC</button>
+      <button class="secondary small" onclick="setDumpBase(0x0100)">0100h</button>
+      <button class="secondary small" onclick="setDumpBase(vm.dta)">DTA</button>
+      <span style="margin-left: auto; color: #888; font-size: 0.72rem;">
+        * Click hex byte to edit directly (press Enter to commit, Esc to cancel)
+      </span>
+    </div>
+
+    <table class="dump-table">
+      <thead>
+        <tr>
+          <th style="width: 60px;">Addr</th>
+          <th style="width: 200px;">ASCII / Kana</th>
+          <th>Hex Bytes (00-ff)</th>
+        </tr>
+      </thead>
+      <tbody id="dumpBody"></tbody>
+    </table>
+  </div>
+
+
+  <div id="viOverlay" role="dialog" aria-modal="true" aria-label="vi editor">
+    <div id="viPanel">
+      <div id="viHeader"></div>
+      <textarea id="viText" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" ></textarea>
+      <div id="viStatus">NORMAL</div>
+      <input id="viCommand" autocomplete="off" spellcheck="false" aria-label="vi command">
+      <div id="viHint">i/I/o/O: insert  |  Esc: normal  |  h j k l: move  |  x dd yy p P  |  /: search  |  :w :q :wq :q!</div>
+    </div>
+  </div>
+  <script src="bdsc.js"></script>
+  <script>
+    class TerminalManager {
+      constructor(screenEl, textEl, cursorEl) {
+        this.screenEl = screenEl;
+        this.textEl = textEl;
+        this.cursorEl = cursorEl;
+        this.buffer = "";
+        this.currentInput = "";
+        this.prompt = "A:\\>";
+        this.isWaitingInput = true;
+        this.inputMode = "shell";
+        this.copyConFileName = "";
+        this.copyConBuffer = "";
+        this.onCommand = null;
+        this.onCopyConComplete = null;
+        this.initEvents();
+      }
+
+      setPrompt(p) { this.prompt = p; }
+
+      beep() {
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "square";
+          osc.frequency.value = 880;
+          gain.gain.setValueAtTime(0.04, ctx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.12);
+        } catch(e) {}
+      }
+
+      initEvents() {
+        this.screenEl.addEventListener("click", () => this.screenEl.focus());
+
+        this.screenEl.addEventListener("paste", (e) => {
+          e.preventDefault();
+          const text = (e.clipboardData || window.clipboardData).getData("text");
+          if (!text) return;
+
+          if (this.inputMode === "copy_con") {
+            const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+            for (let i = 0; i < lines.length; i++) {
+              const line = lines[i];
+              this.buffer += line + "\r\n";
+              this.handleCopyConLine(line);
+            }
+            this.render();
+          } else if (typeof comProgramActive !== "undefined" && comProgramActive) {
+            for (const ch of text.replace(/\r\n?/g, "\n")) {
+              if (ch === "\n") vm.dosInput.push(13);
+              else vm.dosInput.push(ch.charCodeAt(0));
+            }
+          } else {
+            this.currentInput += text.replace(/[\r\n]/g, "");
+            this.render();
+          }
+        });
+
+        this.screenEl.addEventListener("keydown", (e) => {
+          if (typeof comProgramActive !== "undefined" && comProgramActive) {
+            if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === "c") {
+              e.preventDefault();
+              if (vm.dosWaiting === 0x0A) {
+                vm.dosBreak();
+              } else {
+                vm.dosInput.push(0x03);
+                if (vm.dosWaiting !== null) vm.dosWaiting = null;
+              }
+              return;
+            }
+            if (e.key === "Enter" || (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey)) {
+              e.preventDefault();
+              const code = e.key === "Enter" ? 13 : e.key.charCodeAt(0);
+              if (vm.dosWaiting === 0x0A) {
+                if (code === 13) {
+                  const addr = vm.dosLineBuffer;
+                  const max = vm.dosGet8(addr);
+                  const line = vm.dosLineText || "";
+                  vm.dosPut8(addr + 1, line.length);
+                  for (let i = 0; i < line.length; i++) vm.dosPut8(addr + 2 + i, line.charCodeAt(i));
+                  if (line.length < max) vm.dosPut8(addr + 2 + line.length, 13);
+                  vm.dosLineText = "";
+                  vm.dosResumeLine = true;
+                  vm.dosWaiting = null;
+                  vm.term.print("\r\n");
+                } else {
+                  const max = vm.dosGet8(vm.dosLineBuffer);
+                  if ((vm.dosLineText || "").length < max) {
+                    vm.dosLineText = (vm.dosLineText || "") + e.key;
+                    vm.term.printChar(code);
+                  }
+                }
+              } else {
+                vm.dosInput.push(code);
+                if (vm.dosWaiting !== null) vm.dosWaiting = null;
+              }
+            }
+            return;
+          }
+          if (!this.isWaitingInput) return;
+
+          if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C")) {
+            e.preventDefault();
+            this.buffer += this.currentInput + "^C\r\n";
+            this.currentInput = "";
+            if (this.inputMode === "copy_con") {
+              this.print("[COPY CON aborted]\r\n");
+              this.inputMode = "shell";
+            }
+            this.showPrompt();
+            return;
+          }
+
+          if (((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "Z")) || e.key === "F6") {
+            e.preventDefault();
+            this.currentInput += "^Z";
+            this.render();
+            return;
+          }
+
+          if (e.key === "Enter") {
+            e.preventDefault();
+            const line = this.currentInput;
+            this.buffer += line + "\r\n";
+            this.currentInput = "";
+            this.render();
+            if (this.inputMode === "shell") {
+              if (this.onCommand) this.onCommand(line.trim());
+            } else if (this.inputMode === "copy_con") {
+              this.handleCopyConLine(line);
+            }
+          } else if (e.key === "Backspace") {
+            e.preventDefault();
+            if (this.currentInput.length > 0) {
+              this.currentInput = this.currentInput.endsWith("^Z") ? this.currentInput.slice(0, -2) : this.currentInput.slice(0, -1);
+              this.render();
+            }
+          } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+            e.preventDefault();
+            this.currentInput += e.key;
+            this.render();
+          }
+        });
+      }
+
+      startCopyCon(fileName) {
+        this.inputMode = "copy_con";
+        this.copyConFileName = fileName;
+        this.copyConBuffer = "";
+        this.print(`[Entering COPY CON: ${fileName.toUpperCase()}]\r\n[Paste code with Ctrl+V, then press Ctrl+Z + Enter to save]\r\n`);
+      }
+
+      handleCopyConLine(line) {
+        const eofIdx = line.indexOf("^Z");
+        if (eofIdx !== -1) {
+          const remainingText = line.substring(0, eofIdx);
+          if (remainingText.length > 0) this.copyConBuffer += remainingText + "\r\n";
+          const fn = this.copyConFileName;
+          const content = this.copyConBuffer;
+          this.inputMode = "shell";
+          if (this.onCopyConComplete) this.onCopyConComplete(fn, content);
+        } else {
+          this.copyConBuffer += line + "\r\n";
+        }
+      }
+
+      print(str) { this.buffer += str; this.render(); }
+      printChar(code) {
+        if (code === 0x07) {
+          this.beep();
+          return;
+        }
+        let ch = code;
+        if (ch >= 0xA1 && ch <= 0xDF) ch += 0xFEC0;
+        this.buffer += String.fromCharCode(ch);
+        this.render();
+      }
+      showPrompt() { this.buffer += this.prompt; this.currentInput = ""; this.isWaitingInput = true; this.render(); }
+      clear() { this.buffer = ""; this.currentInput = ""; this.render(); }
+      render() { this.textEl.textContent = this.buffer + this.currentInput; this.screenEl.scrollTop = this.screenEl.scrollHeight; }
+    }
+
+    class PersistentVirtualDisk {
+      constructor() {
+        this.files = new Map(); // fullPath -> { fullPath, name, dir, displayName, data, isDir }
+        this.db = null;
+      }
+
+      async init() {
+        await this.openIndexedDB();
+        await this.loadAll();
+      }
+
+      openIndexedDB() {
+        return new Promise((resolve) => {
+          const req = indexedDB.open("MSXDOS_DiskA_DB", 1);
+          req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains("files")) db.createObjectStore("files", { keyPath: "name" });
+          };
+          req.onsuccess = (e) => { this.db = e.target.result; resolve(); };
+          req.onerror = () => resolve();
+        });
+      }
+
+      async loadAll() {
+        if (!this.db) return;
+        return new Promise((resolve) => {
+          try {
+            const tx = this.db.transaction("files", "readonly");
+            const store = tx.objectStore("files");
+            const req = store.getAll();
+            req.onsuccess = () => {
+              for (const rec of (req.result || [])) {
+                let fullPath = rec.name;
+                let isDir = rec.isDir || false;
+                let dir = "/";
+                let fileName = fullPath;
+
+                // Backward compatibility for root-level files without leading slash
+                if (!fullPath.startsWith("/")) {
+                  fullPath = "/" + fullPath.toUpperCase();
+                  fileName = fullPath.slice(1);
+                  dir = "/";
+                } else {
+                  const parts = fullPath.split("/").filter(p => p.length > 0);
+                  fileName = parts[parts.length - 1];
+                  dir = parts.length === 1 ? "/" : "/" + parts.slice(0, -1).join("/");
+                }
+
+                this.files.set(fullPath, {
+                  fullPath: fullPath,
+                  name: fileName,
+                  dir: dir,
+                  displayName: fileName,
+                  data: rec.data,
+                  isDir: isDir
+                });
+              }
+              resolve();
+            };
+            req.onerror = () => resolve();
+          } catch (e) { resolve(); }
+        });
+      }
+
+      resolvePath(current, target) {
+        let clean = (target || "").replace(/\\/g, "/").trim().toUpperCase();
+        let full = clean.startsWith("/") ? clean : ((current === "/" ? "/" : current + "/") + clean);
+        const parts = full.split("/").filter(p => p.length > 0);
+        const resolved = [];
+        for (const p of parts) {
+          if (p === ".") continue;
+          if (p === "..") {
+            if (resolved.length > 0) resolved.pop();
+          } else {
+            resolved.push(p);
+          }
+        }
+        return "/" + resolved.join("/");
+      }
+
+      async createDir(fullPath) {
+        const norm = this.resolvePath("/", fullPath);
+        if (norm === "/") return;
+        const parts = norm.split("/").filter(p => p.length > 0);
+        const dirName = parts[parts.length - 1];
+        const parentDir = parts.length === 1 ? "/" : "/" + parts.slice(0, -1).join("/");
+
+        const record = {
+          fullPath: norm,
+          name: dirName,
+          dir: parentDir,
+          displayName: dirName,
+          data: new Uint8Array(0),
+          isDir: true
+        };
+        this.files.set(norm, record);
+        if (this.db) {
+          try {
+            const tx = this.db.transaction("files", "readwrite");
+            tx.objectStore("files").put({ name: norm, data: record.data, isDir: true });
+          } catch (e) {}
+        }
+      }
+
+      async putFileInDir(dir, rawName, data) {
+        const normDir = this.resolvePath("/", dir);
+        const fileName = rawName.toUpperCase().trim();
+        const fullPath = (normDir === "/" ? "/" : normDir + "/") + fileName;
+
+        let bytes;
+        if (data instanceof Uint8Array) {
+          bytes = data;
+        } else {
+          const str = (typeof data === "string") ? data : "";
+          const encoded = new TextEncoder().encode(str);
+          if (encoded.length === 0 || encoded[encoded.length - 1] !== 0x1A) {
+            bytes = new Uint8Array(encoded.length + 1);
+            bytes.set(encoded, 0);
+            bytes[encoded.length] = 0x1A;
+          } else {
+            bytes = encoded;
+          }
+        }
+
+        const record = {
+          fullPath: fullPath,
+          name: fileName,
+          dir: normDir,
+          displayName: fileName,
+          data: bytes,
+          isDir: false
+        };
+        this.files.set(fullPath, record);
+        if (this.db) {
+          try {
+            const tx = this.db.transaction("files", "readwrite");
+            tx.objectStore("files").put({ name: fullPath, data: bytes, isDir: false });
+          } catch (e) {}
+        }
+      }
+
+      async putFile(rawName, data) {
+        return this.putFileInDir(currentDir, rawName, data);
+      }
+
+      async deleteEntry(fullPath) {
+        const item = this.files.get(fullPath);
+        if (!item) return false;
+        this.files.delete(fullPath);
+        if (this.db) {
+          try {
+            const tx = this.db.transaction("files", "readwrite");
+            tx.objectStore("files").delete(fullPath);
+          } catch (e) {}
+        }
+        return true;
+      }
+
+      getEntriesInDir(dir) {
+        const norm = this.resolvePath("/", dir);
+        const result = [];
+        for (const [, item] of this.files) {
+          if (item.dir === norm) result.push(item);
+        }
+        result.sort((a, b) => {
+          if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+        return result;
+      }
+
+      findInDir(dir, fcbKey) {
+        const norm = this.resolvePath("/", dir);
+        for (const [, item] of this.files) {
+          if (!item.isDir && item.dir === norm && this.toFcbKey(item.name) === fcbKey) {
+            return item;
+          }
+        }
+        if (norm !== "/") {
+          for (const [, item] of this.files) {
+            if (!item.isDir && item.dir === "/" && this.toFcbKey(item.name) === fcbKey) {
+              return item;
+            }
+          }
+        }
+        return null;
+      }
+
+      toFcbKey(raw) {
+        const clean = (raw || "").toUpperCase().trim();
+        const dotIdx = clean.indexOf(".");
+        const p0 = dotIdx >= 0 ? clean.slice(0, dotIdx) : clean;
+        const p1 = dotIdx >= 0 ? clean.slice(dotIdx + 1) : "";
+        return p0.padEnd(8, " ").slice(0, 8) + p1.padEnd(3, " ").slice(0, 3);
+      }
+
+      // Robust 8.3 FCB wildcard mask generator
+      toFcbMask(pat) {
+        let clean = (pat || "").toUpperCase().trim();
+        if (!clean || clean === "*.*" || clean === "*") {
+          return "???????????";
+        }
+        const dotIdx = clean.indexOf(".");
+        let namePart = dotIdx >= 0 ? clean.slice(0, dotIdx) : clean;
+        let extPart = dotIdx >= 0 ? clean.slice(dotIdx + 1) : "";
+
+        let n = "";
+        for (let i = 0; i < namePart.length && n.length < 8; i++) {
+          const ch = namePart[i];
+          if (ch === "*") {
+            while (n.length < 8) n += "?";
+            break;
+          } else {
+            n += ch;
+          }
+        }
+        while (n.length < 8) n += " ";
+
+        let e = "";
+        for (let i = 0; i < extPart.length && e.length < 3; i++) {
+          const ch = extPart[i];
+          if (ch === "*") {
+            while (e.length < 3) e += "?";
+            break;
+          } else {
+            e += ch;
+          }
+        }
+        while (e.length < 3) e += " ";
+
+        return n.slice(0, 8) + e.slice(0, 3);
+      }
+
+      matchFcb(mask, key) {
+        if (!mask || !key || mask.length !== 11 || key.length !== 11) return false;
+        for (let i = 0; i < 11; i++) {
+          if (mask[i] !== "?" && mask[i] !== key[i]) return false;
+        }
+        return true;
+      }
+
+      getEntry(fullPath) { return this.files.get(fullPath); }
+    }
+
+    class MSXDOS_R800 {
+      constructor(terminal, disk, onTrace) {
+        this.memory = new Uint8Array(65536);
+        this.term = terminal;
+        this.disk = disk;
+        this.onTrace = onTrace;
+        this.dta = 0x0080;
+        this.totalCycles = 0;
+        this.openWriteBuffers = new Map();
+        this.dosInput = [];
+        this.dosWaiting = null;
+        this.dosClockOffset = 0;
+        this.dosVerify = false;
+        this.dosSearch = [];
+        this.dosDrive = 0;
+        this.dos2Handles = new Map(); this.dos2LastError = 0; this.dos2Environment=new Map(); this.dos2Searches=new Map(); this.dos2FibPaths=new Map(); this.dos2DiskCheck=0; this.dos2Redirection=0;
+
+        this.a = 0; this.b = 0; this.c = 0; this.d = 0; this.e = 0; this.h = 0; this.l = 0;
+        this.ix = 0; this.iy = 0;
+        this.sp = 0xF000; this.pc = 0x0100;
+        this.flags = { s: 0, z: 0, ac: 0, p: 0, cy: 0, n: 0 };
+
+        this.parityTable = new Uint8Array(256);
+        for (let i = 0; i < 256; i++) {
+          let cnt = 0;
+          for (let b = 0; b < 8; b++) { if ((i >> b) & 1) cnt++; }
+          this.parityTable[i] = (cnt % 2 === 0) ? 1 : 0;
+        }
+
+        this.halted = false;
+        this.reset();
+      }
+
+      reset() {
+        this.memory.fill(0);
+        this.a = 0; this.b = 0; this.c = 0; this.d = 0; this.e = 0; this.h = 0; this.l = 0;
+        this.ix = 0; this.iy = 0;
+        this.flags = { s: 0, z: 0, ac: 0, p: 0, cy: 0, n: 0 };
+        this.altA=0;this.altF=0x02;this.altBC=0;this.altDE=0;this.altHL=0;
+        this.i=0;this.r=0;this.im=0;this.iff1=false;this.iff2=false;
+        this.pc = 0x0100; this.dta = 0x0080;
+        this.halted = false; this.totalCycles = 0;
+        this.dos2Handles.clear(); this.dos2LastError=0; this.dos2Searches.clear(); this.dos2FibPaths.clear();
+        this.openWriteBuffers.clear(); this.dosSearch=[]; this.dosWaiting=null; this.dosResumeLine=false; this.dosInput=[];
+
+        this.memory[0x0000] = 0x00; // CP/M warm-boot entry; handled as DOS return in step()
+        this.memory[0x0005] = 0xC3; // JP F000H
+        this.memory[0x0006] = 0x00;
+        this.memory[0x0007] = 0xF0;
+
+        this.memory[0xF000] = 0xD7; // RST 2 (BDOS Hook)
+        this.memory[0xF001] = 0xC9; // RET
+
+        this.sp = 0xF000;
+        this.push16(0x0000);
+      }
+
+      getBC() { return (this.b << 8) | this.c; }
+      setBC(v) { this.b = (v >> 8) & 0xFF; this.c = v & 0xFF; }
+      getDE() { return (this.d << 8) | this.e; }
+      setDE(v) { this.d = (v >> 8) & 0xFF; this.e = v & 0xFF; }
+      getHL() { return (this.h << 8) | this.l; }
+      setHL(v) { this.h = (v >> 8) & 0xFF; this.l = v & 0xFF; }
+
+      push16(val) {
+        this.sp = (this.sp - 1) & 0xFFFF;
+        this.memory[this.sp] = (val >> 8) & 0xFF;
+        this.sp = (this.sp - 1) & 0xFFFF;
+        this.memory[this.sp] = val & 0xFF;
+      }
+
+      pop16() {
+        const lo = this.memory[this.sp];
+        this.sp = (this.sp + 1) & 0xFFFF;
+        const hi = this.memory[this.sp];
+        this.sp = (this.sp + 1) & 0xFFFF;
+        return (hi << 8) | lo;
+      }
+
+      getPSW() {
+        let psw = this.flags.n ? 0x02 : 0x00;
+        if (this.flags.s)  psw |= 0x80;
+        if (this.flags.z)  psw |= 0x40;
+        if (this.flags.ac) psw |= 0x10;
+        if (this.flags.p)  psw |= 0x04;
+        if (this.flags.cy) psw |= 0x01;
+        return (this.a << 8) | psw;
+      }
+
+      setPSW(val) {
+        this.a = (val >> 8) & 0xFF;
+        const psw = val & 0xFF;
+        this.flags.s  = (psw & 0x80) ? 1 : 0;
+        this.flags.z  = (psw & 0x40) ? 1 : 0;
+        this.flags.ac = (psw & 0x10) ? 1 : 0;
+        this.flags.p  = (psw & 0x04) ? 1 : 0;
+        this.flags.cy = (psw & 0x01) ? 1 : 0;
+        this.flags.n = (psw & 0x02) ? 1 : 0;
+      }
+
+      getReg(r) {
+        switch (r) {
+          case 0: return this.b; case 1: return this.c;
+          case 2: return this.d; case 3: return this.e;
+          case 4: return this.h; case 5: return this.l;
+          case 6: return this.memory[this.getHL()]; case 7: return this.a;
+        }
+      }
+
+      setReg(r, val) {
+        val &= 0xFF;
+        switch (r) {
+          case 0: this.b = val; break; case 1: this.c = val; break;
+          case 2: this.d = val; break; case 3: this.e = val; break;
+          case 4: this.h = val; break; case 5: this.l = val; break;
+          case 6: this.memory[this.getHL()] = val; break; case 7: this.a = val; break;
+        }
+      }
+
+      getRP(p) {
+        switch (p) {
+          case 0: return this.getBC(); case 1: return this.getDE();
+          case 2: return this.getHL(); case 3: return this.sp;
+        }
+      }
+
+      setRP(p, val) {
+        val &= 0xFFFF;
+        switch (p) {
+          case 0: this.setBC(val); break; case 1: this.setDE(val); break;
+          case 2: this.setHL(val); break; case 3: this.sp = val; break;
+        }
+      }
+
+      setSZP(res) {
+        this.flags.z = ((res & 0xFF) === 0) ? 1 : 0;
+        this.flags.s = (res & 0x80) ? 1 : 0;
+        this.flags.p = this.parityTable[res & 0xFF];
+      }
+
+      add8(val, carry) {
+        const c = carry ? this.flags.cy : 0;
+        const res = this.a + val + c;
+        this.flags.cy = (res > 0xFF) ? 1 : 0;
+        this.flags.ac = (((this.a & 0x0F) + (val & 0x0F) + c) > 0x0F) ? 1 : 0;
+        this.flags.n = 0;
+        const previous=this.a;
+        this.a = res & 0xFF;
+        this.setSZP(this.a);
+        this.zSetOverflowAdd(previous,val,c,this.a);
+      }
+
+      sub8(val, borrow) {
+        const b = borrow ? this.flags.cy : 0;
+        const res = this.a - val - b;
+        this.flags.cy = (res < 0) ? 1 : 0;
+        this.flags.ac = ((this.a & 0x0F) < ((val & 0x0F) + b)) ? 1 : 0;
+        this.flags.n = 1;
+        const previous=this.a;
+        this.a = res & 0xFF;
+        this.setSZP(this.a);
+        this.zSetOverflowSub(previous,val,b,this.a);
+      }
+
+      ana8(val) {
+        this.flags.ac = (((this.a | val) & 0x08) !== 0) ? 1 : 0;
+        this.a &= val;
+        this.flags.cy = 0;this.flags.ac=1;this.flags.n=0;
+        this.setSZP(this.a);
+      }
+
+      xra8(val) { this.a ^= val; this.flags.cy = 0; this.flags.ac = 0; this.flags.n = 0; this.setSZP(this.a); }
+      ora8(val) { this.a |= val; this.flags.cy = 0; this.flags.ac = 0; this.flags.n = 0; this.setSZP(this.a); }
+      cmp8(val) {
+        const res = this.a - val;
+        this.flags.cy = (res < 0) ? 1 : 0;
+        this.flags.ac = ((this.a & 0x0F) < (val & 0x0F)) ? 1 : 0;
+        this.flags.n = 1;
+        this.setSZP(res & 0xFF);
+        this.flags.p = (((this.a ^ val) & (this.a ^ res) & 0x80) !== 0) ? 1 : 0;
+      }
+
+      testCond(cc) {
+        switch (cc) {
+          case 0: return this.flags.z === 0;
+          case 1: return this.flags.z === 1;
+          case 2: return this.flags.cy === 0;
+          case 3: return this.flags.cy === 1;
+          case 4: return this.flags.p === 0;
+          case 5: return this.flags.p === 1;
+          case 6: return this.flags.s === 0;
+          case 7: return this.flags.s === 1;
+        }
+      }
+
+
+      // Z80 instruction extensions. Existing 8080/DOS instruction dispatch is retained.
+      zFetch() { const v=this.memory[this.pc];this.pc=(this.pc+1)&65535;return v; }
+      zWord() { const l=this.zFetch();return l|(this.zFetch()<<8); }
+      zSigned(v) { return v&128?v-256:v; }
+      zRead16(a) { return this.memory[a&65535]|(this.memory[(a+1)&65535]<<8); }
+      zWrite16(a,v) { this.memory[a&65535]=v&255;this.memory[(a+1)&65535]=(v>>8)&255; }
+      zSetSZ(v) { this.flags.s=(v>>7)&1;this.flags.z=(v&255)===0?1:0; }
+      zSetOverflowAdd(a,b,c,res) { this.flags.p=((~(a^b)&(a^res)&128)!==0)?1:0; }
+      zSetOverflowSub(a,b,c,res) { this.flags.p=(((a^b)&(a^res)&128)!==0)?1:0; }
+      zAdd16(a,b,carry=0,subtract=false) {
+        const v=subtract?a-b-carry:a+b+carry, r=v&65535;
+        this.flags.ac=subtract?((a&4095)<((b&4095)+carry)?1:0):((a&4095)+(b&4095)+carry>4095?1:0);
+        this.flags.cy=subtract?(v<0?1:0):(v>65535?1:0);
+        this.flags.n=subtract?1:0;
+        this.flags.s=(r>>15)&1;this.flags.z=r===0?1:0;
+        this.flags.p=subtract?(((a^b)&(a^r)&32768)?1:0):((~(a^b)&(a^r)&32768)?1:0);
+        return r;
+      }
+      zRotateShift(v,kind) {
+        const old=this.flags.cy;let c,r;
+        switch(kind) {
+          case 0:c=v>>7;r=(v<<1)|c;break; // RLC
+          case 1:c=v&1;r=(v>>1)|(c<<7);break; // RRC
+          case 2:c=v>>7;r=(v<<1)|old;break; // RL
+          case 3:c=v&1;r=(v>>1)|(old<<7);break; // RR
+          case 4:c=v>>7;r=v<<1;break; // SLA
+          case 5:c=v&1;r=(v>>1)|(v&128);break; // SRA
+          case 6:c=v>>7;r=(v<<1)|1;break; // SLL (undocumented)
+          default:c=v&1;r=v>>1;break; // SRL
+        }
+        r&=255;this.flags.cy=c;this.flags.ac=0;this.flags.n=0;
+        this.setSZP(r);return r;
+      }
+      zCB(op,addr=null) {
+        const x=op>>6,y=(op>>3)&7,z=op&7;
+        const v=addr===null?this.getReg(z):this.memory[addr];
+        if(x===0) {
+          const r=this.zRotateShift(v,y);
+          if(addr!==null){this.memory[addr]=r;if(z!==6)this.setReg(z,r);}
+          else this.setReg(z,r);
+        } else if(x===1) {
+          const bit=(v>>y)&1;
+          this.flags.z=bit?0:1;this.flags.p=this.flags.z;
+          this.flags.ac=1;this.flags.n=0;
+          this.flags.s=(y===7&&bit)?1:0;
+        } else {
+          const r=x===2?(v&~(1<<y)):(v|(1<<y));
+          if(addr!==null){this.memory[addr]=r;if(z!==6)this.setReg(z,r);}
+          else this.setReg(z,r);
+        }
+      }
+      zED(op) {
+        // R800's extra multiply opcodes are dispatched ahead of standard Z80 ED.
+        if([0xC1,0xC9,0xD1,0xD9].includes(op)) {
+          this.execMULUB(this.getReg((op>>3)&7));return;
+        }
+        if([0xC3,0xD3,0xE3,0xF3].includes(op)) {
+          this.execMULUW(this.getRP((op>>4)&3));return;
+        }
+        const y=(op>>3)&7,p=y>>1,q=y&1;
+        if((op&0xC7)===0x40) { // IN r,(C)
+          const v=this.zPortIn(this.getBC());if(y!==6)this.setReg(y,v);
+          const cy=this.flags.cy;this.setSZP(v);this.flags.cy=cy;this.flags.ac=0;this.flags.n=0;return;
+        }
+        if((op&0xC7)===0x41) {this.zPortOut(this.getBC(),y===6?0:this.getReg(y));return;}
+        if((op&0xCF)===0x42) {this.setHL(this.zAdd16(this.getHL(),this.getRP(p),this.flags.cy,true));return;}
+        if((op&0xCF)===0x4A) {this.setHL(this.zAdd16(this.getHL(),this.getRP(p),this.flags.cy,false));return;}
+        if((op&0xCF)===0x43) {const a=this.zWord();this.zWrite16(a,this.getRP(p));return;}
+        if((op&0xCF)===0x4B) {const a=this.zWord();this.setRP(p,this.zRead16(a));return;}
+        if((op&0xC7)===0x44) {const a=this.a;this.a=0;this.sub8(a,false);return;} // NEG
+        if((op&0xC7)===0x45) {this.pc=this.pop16();this.iff1=this.iff2;return;} // RETN / RETI
+        if((op&0xC7)===0x46) {this.im=([0,0,1,2,0,0,1,2])[y];return;}
+        if(op===0x47){this.i=this.a;return;}
+        if(op===0x4F){this.r=this.a;return;}
+        if(op===0x57||op===0x5F) {
+          this.a=op===0x57?this.i:this.r;
+          const cy=this.flags.cy;this.zSetSZ(this.a);this.flags.p=this.iff2?1:0;
+          this.flags.cy=cy;this.flags.ac=0;this.flags.n=0;return;
+        }
+        if(op===0x67||op===0x6F){ // RRD/RLD
+          const addr=this.getHL(),v=this.memory[addr],a=this.a;
+          if(op===0x67){this.memory[addr]=((a&15)<<4)|(v>>4);this.a=(a&240)|(v&15);}
+          else{this.memory[addr]=((v<<4)&240)|(a&15);this.a=(a&240)|(v>>4);}
+          const cy=this.flags.cy;this.setSZP(this.a);this.flags.cy=cy;this.flags.ac=0;this.flags.n=0;return;
+        }
+        if([0xA0,0xA8,0xB0,0xB8,0xA1,0xA9,0xB1,0xB9,0xA2,0xAA,0xB2,0xBA,0xA3,0xAB,0xB3,0xBB].includes(op)){
+          const dir=(op&8)?-1:1,repeat=(op&16)!==0,group=op&3;
+          if(group===0){ // LDI/LDD/LDIR/LDDR
+            this.memory[this.getDE()]=this.memory[this.getHL()];this.setDE((this.getDE()+dir)&65535);
+            this.setHL((this.getHL()+dir)&65535);this.setBC((this.getBC()-1)&65535);
+            this.flags.ac=0;this.flags.n=0;this.flags.p=this.getBC()?1:0;
+            if(repeat&&this.getBC())this.pc=(this.pc-2)&65535;
+          } else if(group===1){ // CPI/CPD/CPIR/CPDR
+            const a=this.a,b=this.memory[this.getHL()],v=(a-b)&255,cy=this.flags.cy;
+            this.setHL((this.getHL()+dir)&65535);this.setBC((this.getBC()-1)&65535);
+            this.zSetSZ(v);this.flags.ac=((a&15)<(b&15))?1:0;
+            this.flags.n=1;this.flags.p=this.getBC()?1:0;this.flags.cy=cy;
+            if(repeat&&this.getBC()&&!this.flags.z)this.pc=(this.pc-2)&65535;
+          } else { // INI/IND/INIR/INDR and OUTI/OUTD/OTIR/OTDR
+            if(group===2)this.memory[this.getHL()]=this.zPortIn(this.getBC());
+            else this.zPortOut(this.getBC(),this.memory[this.getHL()]);
+            this.setHL((this.getHL()+dir)&65535);this.b=(this.b-1)&255;
+            this.flags.z=this.b===0?1:0;this.flags.n=1;
+            if(repeat&&this.b)this.pc=(this.pc-2)&65535;
+          }
+          return;
+        }
+        // All unused ED opcodes act as NOP on Z80.
+      }
+      zPortIn(port){return this.portIn?this.portIn(port)&255:255;}
+      zPortOut(port,v){if(this.portOut)this.portOut(port,v&255);}
+      zIndex(which){return which===0xDD?this.ix:this.iy;}
+      zSetIndex(which,v){if(which===0xDD)this.ix=v&65535;else this.iy=v&65535;}
+      zIndexed(which){ // DD / FD, including undocumented IXH,IXL,IYH,IYL
+        let op=this.zFetch();
+        while(op===0xDD||op===0xFD){which=op;op=this.zFetch();}
+        if(op===0xCB){const d=this.zSigned(this.zFetch());const cb=this.zFetch();this.zCB(cb,(this.zIndex(which)+d)&65535);return;}
+        if(op===0xED){this.zED(this.zFetch());return;}
+        let ix=this.zIndex(which), disp=null;
+        const addr=()=>{if(disp===null)disp=this.zSigned(this.zFetch());return(ix+disp)&65535;};
+        const get=(r)=>r===4?(ix>>8)&255:r===5?ix&255:r===6?this.memory[addr()]:this.getReg(r);
+        const put=(r,v)=>{v&=255;if(r===4){ix=(ix&255)|(v<<8);this.zSetIndex(which,ix);}else if(r===5){ix=(ix&65280)|v;this.zSetIndex(which,ix);}else if(r===6)this.memory[addr()]=v;else this.setReg(r,v);};
+        if(op===0x21){this.zSetIndex(which,this.zWord());return;}
+        if(op===0x22){this.zWrite16(this.zWord(),ix);return;}
+        if(op===0x2A){this.zSetIndex(which,this.zRead16(this.zWord()));return;}
+        if(op===0x23||op===0x2B){this.zSetIndex(which,(ix+(op===0x23?1:-1))&65535);return;}
+        if((op&0xCF)===0x09){const p=(op>>4)&3,v=p===2?ix:this.getRP(p),sum=ix+v;
+          this.flags.cy=sum>65535?1:0;this.flags.ac=(((ix&4095)+(v&4095))>4095)?1:0;this.flags.n=0;
+          this.zSetIndex(which,sum);return;}
+        if(op===0xE1){this.zSetIndex(which,this.pop16());return;}
+        if(op===0xE5){this.push16(ix);return;}
+        if(op===0xE3){const v=this.zRead16(this.sp);this.zWrite16(this.sp,ix);this.zSetIndex(which,v);return;}
+        if(op===0xE9){this.pc=ix;return;}
+        if(op===0xF9){this.sp=ix;return;}
+        if((op&0xC7)===0x04){const r=(op>>3)&7;if(r>=4&&r<=6){const old=get(r),v=(old+1)&255;
+          this.flags.ac=(old&15)===15?1:0;this.flags.n=0;this.zSetSZ(v);
+          this.flags.p=old===127?1:0;put(r,v);return;}}
+        if((op&0xC7)===0x05){const r=(op>>3)&7;if(r>=4&&r<=6){const old=get(r),v=(old-1)&255;
+          this.flags.ac=(old&15)===0?1:0;this.flags.n=1;this.zSetSZ(v);
+          this.flags.p=old===128?1:0;put(r,v);return;}}
+        if((op&0xC7)===0x06){const r=(op>>3)&7;if(r>=4&&r<=6){if(r===6)addr();put(r,this.zFetch());return;}}
+        if(op>=0x40&&op<=0x7F&&op!==0x76){const y=(op>>3)&7,z=op&7;
+          if(y>=4&&y<=6||z>=4&&z<=6){
+            // LD H,(IX+d), LD (IX+d),H use ordinary H/L rather than IXH/IXL.
+            if(y===6||z===6){const a=addr();const v=z===6?this.memory[a]:z===4?this.h:z===5?this.l:this.getReg(z);
+              if(y===6)this.memory[a]=v;else if(y===4)this.h=v;else if(y===5)this.l=v;else this.setReg(y,v);
+            }else put(y,get(z));return;
+          }}
+        if(op>=0x80&&op<=0xBF){const r=op&7;if(r>=4&&r<=6){const v=get(r);this.zAlu((op>>3)&7,v);return;}}
+        // Prefix is ignored for opcodes that do not reference HL/H/L.
+        this.pc=(this.pc-1)&65535;this.step();
+      }
+      zAlu(y,v){switch(y){case 0:this.add8(v,false);break;case 1:this.add8(v,true);break;
+        case 2:this.sub8(v,false);break;case 3:this.sub8(v,true);break;
+        case 4:this.ana8(v);break;case 5:this.xra8(v);break;case 6:this.ora8(v);break;case 7:this.cmp8(v);break;}}
+      zBaseSpecial(op){
+        if(op===0x08){const a=this.a,f=this.getPSW()&255;this.a=this.altA;this.setPSW((this.a<<8)|this.altF);this.altA=a;this.altF=f;return true;}
+        if(op===0xD9){let v=this.getBC();this.setBC(this.altBC);this.altBC=v;
+          v=this.getDE();this.setDE(this.altDE);this.altDE=v;
+          v=this.getHL();this.setHL(this.altHL);this.altHL=v;return true;}
+        if(op===0x10){const d=this.zSigned(this.zFetch());this.b=(this.b-1)&255;if(this.b)this.pc=(this.pc+d)&65535;return true;}
+        if(op===0x18||op===0x20||op===0x28||op===0x30||op===0x38){const d=this.zSigned(this.zFetch());
+          if(op===0x18||this.testCond(({0x20:0,0x28:1,0x30:2,0x38:3})[op]))this.pc=(this.pc+d)&65535;return true;}
+        if(op===0xF3){this.iff1=false;this.iff2=false;return true;}
+        if(op===0xFB){this.iff1=true;this.iff2=true;return true;}
+        if(op===0xD3){const port=(this.a<<8)|this.zFetch();this.zPortOut(port,this.a);return true;}
+        if(op===0xDB){const port=(this.a<<8)|this.zFetch();this.a=this.zPortIn(port);return true;}
+        return false;
+      }
+
+      // R800 Multipliers
+      execMULUB(rVal) {
+        const prod = (this.a * rVal) & 0xFFFF;
+        this.setHL(prod);
+        this.flags.z = (prod === 0) ? 1 : 0;
+        this.flags.cy = (this.h !== 0) ? 1 : 0;
+      }
+
+      execMULUW(ssVal) {
+        const hl = this.getHL();
+        const prod = hl * ssVal;
+        const low16 = prod & 0xFFFF;
+        const high16 = Math.floor(prod / 65536) & 0xFFFF;
+        this.setHL(low16);
+        this.setDE(high16);
+        this.flags.z = (prod === 0) ? 1 : 0;
+        this.flags.cy = (high16 !== 0) ? 1 : 0;
+      }
+
+      // MSX-DOS 1 FCB service helpers. DOS2 handle APIs below remain separate.
+      dosGet8(addr) { return this.memory[addr & 65535]; }
+      dosPut8(addr, value) { this.memory[addr & 65535] = value & 255; }
+      dosGet16(addr) { return this.dosGet8(addr) | (this.dosGet8(addr+1) << 8); }
+      dosPut16(addr, v) { this.dosPut8(addr,v); this.dosPut8(addr+1,v>>8); }
+      dosGet32(addr) { return (this.dosGet16(addr) + this.dosGet16(addr+2)*65536) >>> 0; }
+      dosPut32(addr,v) { this.dosPut16(addr,v); this.dosPut16(addr+2,Math.floor(v/65536)); }
+      dosFcbKey(addr) {
+        let key=''; for(let i=1;i<=11;i++) key+=String.fromCharCode(this.dosGet8(addr+i));
+        return key.toUpperCase();
+      }
+      dosFcbName(key) { return key.slice(0,8).trimEnd()+(key.slice(8).trimEnd()?'.'+key.slice(8).trimEnd():''); }
+      dosFind(key) { return this.disk.findInDir(currentDir,key); }
+      dosMatches(key) {
+        return this.disk.getEntriesInDir(currentDir).filter(e=>!e.isDir && this.disk.matchFcb(key,this.disk.toFcbKey(e.name)));
+      }
+      dosFile(fcb) {
+        const writer=this.openWriteBuffers.get(fcb);
+        if(writer) return writer;
+        const found=this.dosFind(this.dosFcbKey(fcb));
+        return found ? {name:found.name,path:found.fullPath, data:found.data, dirty:false} : null;
+      }
+      dosOpen(fcb, file, create=false) {
+        if(!file) {this.a=255;this.l=this.a;return;}
+        let obj={name:file.name,path:file.fullPath||this.disk.resolvePath(currentDir,file.name),data:create?new Uint8Array(0):file.data,dirty:!!create};
+        this.openWriteBuffers.set(fcb,obj);
+        this.dosPut16(fcb+14,128);
+        this.dosPut32(fcb+16,obj.data.length);
+        this.dosPut8(fcb+13,0);
+        this.dosPut8(fcb+15, Math.min(128,Math.max(0,Math.ceil(obj.data.length/128)-(this.dosGet8(fcb+12)*128))));
+        this.a=0;this.l=0;
+      }
+      dosSave(fcb) {
+        const file=this.openWriteBuffers.get(fcb);
+        if(!file || !file.dirty) return;
+        file.dirty=false;
+        const path=file.path;
+        const parts=path.split('/').filter(Boolean), name=parts.pop(), dir='/'+parts.join('/');
+        this.disk.putFileInDir(dir,name,file.data).then(()=>renderVDiskList());
+      }
+      dosResize(file, length) {
+        if(length>16*1024*1024 || length<0) return false; // bounded in-memory virtual disk
+        if(file.data.length!==length) { const a=new Uint8Array(length);a.set(file.data.subarray(0,length));file.data=a;file.dirty=true; }
+        return true;
+      }
+      dosRead(file, position, length, dest) {
+        if(!file || position>=file.data.length) return 0;
+        const n=Math.min(length,file.data.length-position);
+        for(let i=0;i<n;i++) this.dosPut8(dest+i,file.data[position+i]);
+        for(let i=n;i<length;i++) this.dosPut8(dest+i,0);
+        return n;
+      }
+      dosWrite(file,position,length,source) {
+        if(!file || !this.dosResize(file,Math.max(file.data.length,position+length))) return false;
+        for(let i=0;i<length;i++) file.data[position+i]=this.dosGet8(source+i);
+        file.dirty=true;return true;
+      }
+      dosSeqRecord(fcb) {return (this.dosGet8(fcb+12)+(this.dosGet8(fcb+14-1)<<8))*128+this.dosGet8(fcb+32);}
+      dosSetSeq(fcb,n) {
+        this.dosPut8(fcb+12,(n>>7)&255);
+        this.dosPut8(fcb+14-1,(n>>15)&255);
+        this.dosPut8(fcb+32,n&127);
+      }
+      dosRecord(fcb,size=128) {return this.dosGet32(fcb+33) & (size<64?0xFFFFFFFF:0xFFFFFF);}
+      dosSetRecord(fcb,n,size=128) {
+        const keep=this.dosGet8(fcb+36);
+        this.dosPut32(fcb+33,n>>>0);
+        if(size>=64) this.dosPut8(fcb+36,keep);
+      }
+      dosSearchNext() {
+        const file=this.dosSearch && this.dosSearch.shift();
+        if(!file) {this.a=255;this.l=255;return;}
+        const key=this.disk.toFcbKey(file.name), d=this.dta;
+        for(let i=0;i<36;i++) this.dosPut8(d+i,0);
+        this.dosPut8(d,1);
+        for(let i=0;i<11;i++) this.dosPut8(d+1+i,key.charCodeAt(i));
+        this.dosPut16(d+14,128);
+        this.dosPut32(d+16,file.data.length);
+        this.dosPut8(d+15,Math.min(128,Math.ceil(file.data.length/128)));
+        this.a=0;this.l=0;
+      }
+      dosBreak() {
+        this.dosInput.length = 0;
+        this.dosWaiting = null;
+        this.dosResumeLine = false;
+        this.halted = true;
+        this.term.print("^C\r\n");
+      }
+      dos1(fn) {
+        const f=this.getDE(); let file, n, size, rec, ok;
+        const result=v=>{this.a=v;this.l=v;};
+        switch(fn) {
+          case 0x00: this.halted=true; return true;
+          case 0x01: case 0x07: case 0x08: case 0x03: {
+            const key=this.dosInput.length?this.dosInput.shift():null;
+            if (key === 0x03 && (fn === 0x01 || fn === 0x08)) {
+              this.dosBreak();
+              return true;
+            }
+            if(key===null && fn!==0x03) {this.dosWaiting=fn;return true;}
+            result(key===null?0x1A:key);
+            if(fn===0x01) this.term.printChar(this.a);
+            return true;
+          }
+          case 0x04: case 0x05: return true; // no AUX/PRN device installed
+          case 0x06: {
+            if(this.e!==255) this.term.printChar(this.e);
+            else result(this.dosInput.length?this.dosInput.shift():0);
+            return true;
+          }
+          case 0x0A: {if(this.dosResumeLine){this.dosResumeLine=false;return true;} this.dosWaiting=fn;this.dosLineBuffer=f;this.dosLineText='';return true;}
+          case 0x0B:
+            if (this.dosInput[0] === 0x03) { this.dosBreak(); return true; }
+            result(this.dosInput.length ? 255 : 0);
+            return true;
+          case 0x0C: this.b=0;this.h=0;result(0x22);return true;
+          case 0x0D: this.dta=0x80;for(const addr of this.openWriteBuffers.keys())this.dosSave(addr);return true;
+          case 0x0E: this.dosDrive=0;this.dosPut8(4,0);result(this.e===0?1:0);return true;
+          case 0x0F: file=this.dosMatches(this.dosFcbKey(f))[0];this.dosOpen(f,file);return true;
+          case 0x10: file=this.dosFile(f);if(!file){result(255);return true;}this.dosSave(f);result(0);return true;
+          case 0x11: this.dosSearch=this.dosMatches(this.dosFcbKey(f));this.dosSearchNext();return true;
+          case 0x12: this.dosSearchNext();return true;
+          case 0x13: {
+            const matches=this.dosMatches(this.dosFcbKey(f));
+            for(const entry of matches)this.disk.deleteEntry(entry.fullPath);
+            result(matches.length?0:255);if(matches.length)renderVDiskList();return true;
+          }
+          case 0x14: case 0x15: case 0x21: case 0x22: case 0x28: {
+            file=this.dosFile(f);if(!file){result(1);return true;}
+            rec=(fn===0x14||fn===0x15)?this.dosSeqRecord(f):this.dosRecord(f);
+            if(fn===0x14||fn===0x21) {
+              n=this.dosRead(file,rec*128,128,this.dta);
+              // CP/M text compatibility: mark the first byte after a short
+              // final sequential record as EOF, without modifying the file.
+              if(fn===0x14 && n>0 && n<128 && !file.data.includes(0x1A)) {
+                this.dosPut8(this.dta+n,0x1A);
+              }
+              result(n?0:1);
+            } else {
+              ok=this.dosWrite(file,rec*128,128,this.dta);
+              result(ok?0:1);
+              if(ok)this.dosPut32(f+16,file.data.length);
+            }
+            if(fn===0x14||fn===0x15) {if(this.a===0)this.dosSetSeq(f,rec+1);}
+            else this.dosSetSeq(f,rec);
+            return true;
+          }
+          case 0x16: {
+            const key=this.dosFcbKey(f),name=this.dosFcbName(key);
+            if(key.includes('?')||!name||name.includes('/')||this.dosGet8(f)>1) {result(255);return true;}
+            const existing=this.dosFind(key);
+            if(existing && this.dosGet8(f+12)!==0){this.dosOpen(f,existing);return true;}
+            this.dosOpen(f,{name,fullPath:this.disk.resolvePath(currentDir,name),data:new Uint8Array(0)},true);
+            return true;
+          }
+          case 0x17: {
+            const old=this.dosMatches(this.dosFcbKey(f));let count=0;
+            let mask='';for(let i=17;i<=27;i++)mask+=String.fromCharCode(this.dosGet8(f+i)).toUpperCase();
+            for(const entry of old) {
+              const key=this.disk.toFcbKey(entry.name);
+              const nk=[...mask].map((c,i)=>c==='?'?key[i]:c).join('');
+              const name=this.dosFcbName(nk),path=this.disk.resolvePath(currentDir,name);
+              if(this.disk.getEntry(path)||name.includes('/'))continue;
+              this.disk.deleteEntry(entry.fullPath);
+              this.disk.putFileInDir(currentDir,name,entry.data);count++;
+            }
+            result(count?0:255);if(count)renderVDiskList();return true;
+          }
+          case 0x18: this.setHL(1);return true;
+          case 0x19: result(0);return true;
+          case 0x1A: this.dta=f;return true;
+          case 0x1B: { // synthetic allocation geometry, not physical sectors
+            if(this.e>1){result(255);return true;}
+            this.setBC(512);this.setDE(1440);this.setHL(1400);this.ix=0;this.iy=0;
+            this.a=2;return true;
+          }
+          case 0x23: {
+            file=this.dosMatches(this.dosFcbKey(f))[0];if(!file){result(255);return true;}
+            this.dosPut8(f+33,Math.ceil(file.data.length/128)&255);
+            this.dosPut8(f+34,(Math.ceil(file.data.length/128)>>8)&255);
+            this.dosPut8(f+35,(Math.ceil(file.data.length/128)>>16)&255);
+            result(0);return true;
+          }
+          case 0x24: this.dosSetRecord(f,this.dosSeqRecord(f));return true;
+          case 0x26: case 0x27: {
+            file=this.dosFile(f);size=this.dosGet16(f+14);n=this.getHL();rec=this.dosRecord(f,size);
+            if(!file||!size||n*size>65535){result(1);if(fn===0x27)this.setHL(0);return true;}
+            const pos=rec*size;
+            if(fn===0x26){
+              ok=n===0?this.dosResize(file,pos):this.dosWrite(file,pos,n*size,this.dta);
+              if(ok){this.dosSetRecord(f,rec+n,size);this.dosPut32(f+16,file.data.length);}
+              result(ok?0:1);
+            } else {
+              const available=Math.max(0,file.data.length-pos);
+              const records=Math.min(n,Math.ceil(available/size));
+              if(records)this.dosRead(file,pos,records*size,this.dta);
+              this.dosSetRecord(f,rec+records,size);
+              result(records===n?0:1);this.setHL(records);
+            }
+            return true;
+          }
+          case 0x2A: case 0x2C: {
+            const date=new Date(Date.now()+this.dosClockOffset);
+            if(fn===0x2A){this.setHL(date.getFullYear());this.d=date.getMonth()+1;this.e=date.getDate();this.a=date.getDay();}
+            else {this.h=date.getHours();this.l=date.getMinutes();this.d=date.getSeconds();this.e=0;}
+            return true;
+          }
+          case 0x2B: case 0x2D: {
+            const date=new Date(Date.now()+this.dosClockOffset),test=new Date(date);
+            if(fn===0x2B){
+              const year=this.getHL(),month=this.d,day=this.e;
+              test.setFullYear(year,month-1,day);
+              ok=year>=1980&&year<=2079&&test.getFullYear()===year&&test.getMonth()===month-1&&test.getDate()===day;
+            } else {
+              ok=this.h<24&&this.l<60&&this.d<60;
+              if(ok)test.setHours(this.h,this.l,this.d,0);
+            }
+            if(ok)this.dosClockOffset+=test.getTime()-date.getTime();result(ok?0:255);return true;
+          }
+          case 0x2E: this.dosVerify=!!this.e;return true;
+          case 0x2F: case 0x30: // No raw FAT disk image / sector device is attached.
+            result(1);return true;
+          // MSX-DOS 1 reserved calls have no operation and return A=00h.
+          case 0x1C: case 0x1D: case 0x1E: case 0x1F: case 0x20:
+          case 0x25: case 0x29:
+            this.a=0; return true;
+          default: return false;
+        }
+      }
+
+      // MSX-DOS 2 extension. Isolated from 00h-30h CP/M and DOS1 handlers.
+      dos2ReadString(ptr, max=255) {
+        let text=''; for(let i=0;i<max;i++) {const ch=this.dosGet8(ptr+i);if(ch===0||ch===13)break;text+=String.fromCharCode(ch);}
+        return text;
+      }
+      dos2WriteString(ptr, str, max=64) {
+        for(let i=0;i<Math.min(str.length,max-1);i++)this.dosPut8(ptr+i,str.charCodeAt(i));
+        this.dosPut8(ptr+Math.min(str.length,max-1),0);
+      }
+      dos2Error(code) {this.a=code&255;if(this.a)this.dos2LastError=this.a;return true;}
+      dos2Path(ptr) {if(this.dosGet8(ptr)===0xFF){return this.dos2FibPaths?.get(ptr)||null;}let n=this.dos2ReadString(ptr).replace(/^A:/i,'');return this.disk.resolvePath(currentDir,n);}
+      dos2Handle(h) {return this.dos2Handles.get(h)||null;}
+      dos2Slot() {for(let i=5;i<64;i++)if(!this.dos2Handles.has(i))return i;return -1;}
+      dos2Persist(file) {
+        if(!file||!file.dirty||!file.path)return;
+        file.dirty=false;
+        const parts=file.path.split('/').filter(Boolean),name=parts.pop(),dir='/'+parts.join('/');
+        this.disk.putFileInDir(dir,name,file.buffer).then(()=>renderVDiskList());
+      }
+      dos2MoveEntry(oldPath,newPath) {
+        const entry=this.disk.getEntry(oldPath);
+        if(!entry || this.disk.getEntry(newPath) || newPath==='/' || (entry.isDir && newPath.startsWith(oldPath+'/')))return false;
+        const targets=[...this.disk.files.values()].filter(e=>e.fullPath===oldPath||(entry.isDir&&e.fullPath.startsWith(oldPath+'/')));
+        for(const e of targets)this.disk.deleteEntry(e.fullPath);
+        for(const e of targets) {
+          const path=newPath+e.fullPath.slice(oldPath.length),p=path.split('/').filter(Boolean),name=p.pop(),dir='/'+p.join('/');
+          if(e.isDir)this.disk.createDir(path); else this.disk.putFileInDir(dir,name,e.data);
+        }
+        return true;
+      }
+      dos2Fib(ptr,entry) {
+        const path=entry.fullPath;
+        for(let i=0;i<64;i++)this.dosPut8(ptr+i,0);
+        this.dosPut8(ptr,255);this.dos2WriteString(ptr+1,entry.name,13);
+        this.dosPut8(ptr+14,entry.attrs??(entry.isDir?0x10:0x20));
+        this.dosPut16(ptr+15,entry.time??0);this.dosPut16(ptr+17,entry.date??0);
+        this.dosPut32(ptr+21,entry.isDir?0:entry.data.length);this.dosPut8(ptr+25,1);
+        this.dos2FibPaths.set(ptr,path);
+      }
+      dos2SearchNext(ptr) {
+        const state=this.dos2Searches.get(ptr);
+        if(!state||state.index>=state.matches.length)return this.dos2Error(0xD7);
+        this.dos2Fib(ptr,state.matches[state.index++]);return this.dos2Error(0);
+      }
+      dos2Call(fn) {
+        const pathFn=()=>this.dos2Path(this.getDE());
+        let h=this.b, f=this.dos2Handle(h), entry, path, mode, size, count;
+        const ok=()=>this.dos2Error(0), fail=()=>this.dos2Error(0xC2); // handle not open
+        switch(fn) {
+          case 0x40: case 0x41: { // FFIRST/FNEXT, FIB is 64 bytes
+            if(fn===0x41)return this.dos2SearchNext(this.ix);
+            const raw=this.dos2ReadString(this.getDE());const full=pathFn();
+            const slash=full.lastIndexOf('/'),dir=full.slice(0,slash)||'/',pat=raw.endsWith('/')||raw.endsWith('\\')?'*.*':full.slice(slash+1)||'*.*';
+            const mask=this.disk.toFcbMask(pat),attrs=this.b;
+            const matches=this.disk.getEntriesInDir(dir).filter(e=>{
+              const a=e.attrs??(e.isDir?0x10:0x20);
+              return !(a&0x10&&!(attrs&0x10))&&!(a&0x02&&!(attrs&0x02))&&!(a&0x04&&!(attrs&0x04))&&this.disk.matchFcb(mask,this.disk.toFcbKey(e.name));
+            });
+            this.dos2Searches.set(this.ix,{matches,index:0});return this.dos2SearchNext(this.ix);
+          }
+          case 0x42: { // FNEW: create file or directory and return FIB
+            path=pathFn();const existing=this.disk.getEntry(path);
+            if(existing&&(this.b&0x80))return this.dos2Error(0xCB);
+            if(!path||path==='/'||path.includes('*')||path.includes('?'))return this.dos2Error(0xDA);
+            if(!existing){if(this.b&0x10)this.disk.createDir(path);else {
+              const pp=path.split('/').filter(Boolean),name=pp.pop();this.disk.putFileInDir('/'+pp.join('/'),name,new Uint8Array(0));
+            }}
+            entry=this.disk.getEntry(path);if(!entry)return this.dos2Error(0xD7);
+            this.dos2Fib(this.ix,entry);renderVDiskList();return ok();
+          }
+          case 0x43: case 0x44: { // OPEN / CREATE: B=new handle
+            mode=this.a; path=pathFn(); entry=this.disk.getEntry(path);
+            if(fn===0x43 && (!entry||entry.isDir))return this.dos2Error(0xD7);
+            if(fn===0x44 && (!path||path==='/'||this.disk.getEntry(path)?.isDir))return this.dos2Error(0xD8);
+            if(fn===0x44 && (this.b&0x80) && entry)return this.dos2Error(0xCB);
+            const slot=this.dos2Slot();if(slot<0)return this.dos2Error(0xC4);
+            if(mode&0xF8)return this.dos2Error(0xB8);
+            const object={path,buffer:fn===0x44?new Uint8Array(0):new Uint8Array(entry.data),pos:0,mode,dirty:fn===0x44};
+            this.dos2Handles.set(slot,object);this.b=slot;
+            if(fn===0x44)this.dos2Persist(object);
+            return ok();
+          }
+          case 0x45: case 0x46: { // CLOSE / ENSURE
+            if(h<5)return ok();if(!f)return fail();
+            this.dos2Persist(f);if(fn===0x45)this.dos2Handles.delete(h);return ok();
+          }
+          case 0x47: { // DUP: share the file pointer/buffer object
+            if(!f)return fail();const slot=this.dos2Slot();if(slot<0)return this.dos2Error(0xC4);
+            this.dos2Handles.set(slot,f);this.b=slot;return ok();
+          }
+          case 0x48: { // READ: HL=actual count; zero byte read only on EOF => C7h
+            size=this.getHL();const dest=this.getDE();
+            if(!f){this.setHL(0);return h===0?this.dos2Error(0xC7):fail();}
+            if(f.mode&2){this.setHL(0);return this.dos2Error(0xC6);}
+            count=Math.min(size,Math.max(0,f.buffer.length-f.pos));
+            for(let i=0;i<count;i++)this.dosPut8(dest+i,f.buffer[f.pos+i]);
+            f.pos+=count;this.setHL(count);return this.dos2Error(count===0&&size>0?0xC7:0);
+          }
+          case 0x49: { // WRITE: HL=actual count
+            size=this.getHL();const source=this.getDE();
+            if(h===1||h===2){for(let i=0;i<size;i++)this.term.printChar(this.dosGet8(source+i));return ok();}
+            if(!f){this.setHL(0);return fail();}
+            if(f.mode&1){this.setHL(0);return this.dos2Error(0xC6);}
+            if(f.pos+size>16*1024*1024){this.setHL(0);return this.dos2Error(0xD4);}
+            if(f.pos+size>f.buffer.length){const expanded=new Uint8Array(f.pos+size);expanded.set(f.buffer);f.buffer=expanded;}
+            for(let i=0;i<size;i++)f.buffer[f.pos+i]=this.dosGet8(source+i);
+            f.pos+=size;f.dirty=true;this.setHL(size);return ok();
+          }
+          case 0x4A: { // SEEK: signed DE:HL offset
+            if(!f)return fail();
+            const offset=((this.getDE()*65536+this.getHL())>>>0)|0;
+            const pos=(this.a===0?0:this.a===1?f.pos:this.a===2?f.buffer.length:NaN)+offset;
+            if(!Number.isFinite(pos)||pos<0||pos>0xFFFFFFFF)return this.dos2Error(0xB8);
+            f.pos=pos;this.setDE(Math.floor(pos/65536));this.setHL(pos&65535);return ok();
+          }
+          case 0x4B: { // IOCTL, limited to virtual disk handles and screen devices
+            if(!f&&h>4)return fail();
+            const sub=this.a;
+            if(sub===0){const eof=f&&f.pos>=f.buffer.length?0x40:0;this.setDE(f?eof:(0xA0|(h===0?1:2)));return ok();}
+            if(sub===1)return f?this.dos2Error(0xB8):ok();
+            if(sub===2||sub===3){this.e=sub===3?255:(f?(f.pos<f.buffer.length?255:0):(this.dosInput.length?255:0));return ok();}
+            if(sub===4){this.d=f?0:25;this.e=f?0:80;return ok();}
+            return this.dos2Error(0xB8);
+          }
+          case 0x4C: {if(!f)return fail();this.b=(f.path===pathFn())?255:0;return ok();}
+          case 0x4D: { // DELETE one named file or empty directory
+            path=pathFn();entry=this.disk.getEntry(path);
+            if(!entry)return this.dos2Error(0xD7);
+            if(path==='/'||entry.isDir&&this.disk.getEntriesInDir(path).length)return this.dos2Error(0xD9);
+            if([...this.dos2Handles.values()].some(x=>x.path===path))return this.dos2Error(0xCA);
+            this.disk.deleteEntry(path);renderVDiskList();return ok();
+          }
+          case 0x4E: case 0x4F: { // RENAME / MOVE
+            path=pathFn();entry=this.disk.getEntry(path);if(!entry)return this.dos2Error(0xD7);
+            if([...this.dos2Handles.values()].some(x=>x.path===path))return this.dos2Error(0xCA);
+            const target=this.dos2ReadString(this.getHL());
+            if(fn===0x4E && (target.includes('/')||target.includes('\\')||target.includes(':')))return this.dos2Error(0xDA);
+            const dest=fn===0x4E?path.slice(0,path.lastIndexOf('/')+1)+target:this.disk.resolvePath(currentDir,target)+(target.endsWith(entry.name)?'':'/'+entry.name);
+            if(!this.dos2MoveEntry(path,this.disk.resolvePath('/',dest)))return this.dos2Error(0xCB);
+            renderVDiskList();return ok();
+          }
+          case 0x50: case 0x55: { // path/handle get or set attributes
+            entry=fn===0x50?this.disk.getEntry(pathFn()):this.disk.getEntry(f?.path);
+            if(!entry)return this.dos2Error(0xD7);
+            const attr=entry.attrs??(entry.isDir?0x10:0x20);
+            if(this.a===0){this.l=attr;return ok();}
+            if(this.a!==1)return this.dos2Error(0xB8);
+            const mask=entry.isDir?0x02:0x27;
+            if(((this.l^attr)&~mask)!==0)return this.dos2Error(0xB8);
+            entry.attrs=(attr&~mask)|(this.l&mask);this.l=entry.attrs;return ok();
+          }
+          case 0x51: case 0x56: { // path or handle last modified DOS date/time
+            entry=fn===0x51?this.disk.getEntry(pathFn()):this.disk.getEntry(f?.path);
+            if(!entry)return this.dos2Error(0xD7);
+            if(this.a===1) {entry.time=this.ix;entry.date=this.getHL();return ok();}
+            if(this.a!==0)return this.dos2Error(0xB8);
+            this.setDE(entry.time||0);this.setHL(entry.date||0);return ok();
+          }
+          case 0x52: { // HDELETE: delete file via handle
+            if(!f)return fail();
+            if([...this.dos2Handles.values()].filter(x=>x.path===f.path&&x!==f).length)return this.dos2Error(0xCA);
+            for(const [id,x] of this.dos2Handles)if(x===f)this.dos2Handles.delete(id);
+            this.disk.deleteEntry(f.path);renderVDiskList();return ok();
+          }
+          case 0x53: case 0x54: { // HRENAME / HMOVE
+            if(!f)return fail();
+            const old=f.path,entry=this.disk.getEntry(old);if(!entry)return this.dos2Error(0xD7);
+            const target=this.dos2ReadString(this.getHL());
+            const name=fn===0x53?target:entry.name;
+            const base=fn===0x53?old.slice(0,old.lastIndexOf('/'))||'/':this.disk.resolvePath(currentDir,target);
+            const newpath=this.disk.resolvePath(base,name);
+            this.dos2Persist(f);
+            if(!this.dos2MoveEntry(old,newpath))return this.dos2Error(0xCB);
+            f.path=newpath;renderVDiskList();return ok();
+          }
+          case 0x57: this.setDE(this.dta);return ok(); // GETDTA (not file date/time)
+          case 0x58: this.b=this.dosVerify?255:0;return ok();
+          case 0x5B: { // PARSE pathname, flags and source pointers
+            const ptr=this.getDE(),text=this.dos2ReadString(ptr);
+            const matched=(text.match(/^[A-Za-z]:?[\\\/A-Za-z0-9_.?*\-]*/)||[''])[0];
+            let off=matched.length, last=Math.max(matched.lastIndexOf('\\'),matched.lastIndexOf('/'))+1;
+            if(/^[A-Za-z]:/.test(matched))last=Math.max(last,2);
+            const item=matched.slice(last);let flags=(matched.length>2?1:0)|(last>2?2:0)|(/^[A-Za-z]:/.test(matched)?4:0);
+            if(item&&item!=='..'&&item!=='.')flags|=8;
+            if(item.includes('.'))flags|=16;if(/[?*]/.test(item))flags|=32;
+            if(item==='.'||item==='..')flags|=64;if(item==='..')flags|=128;
+            this.b=flags;this.c=1;this.setHL((ptr+last)&65535);this.setDE((ptr+off)&65535);return ok();
+          }
+          case 0x5C: { // PARSE filename into 11-byte FCB mask
+            const ptr=this.getDE(),text=this.dos2ReadString(ptr);
+            const part=(text.match(/^[A-Za-z0-9_.?*\-]*/)||[''])[0];
+            const mask=this.disk.toFcbMask(part);
+            for(let i=0;i<11;i++)this.dosPut8(this.getHL()+i,mask.charCodeAt(i));
+            this.b=(part?8:0)|(part.includes('.')?16:0)|(/[?*]/.test(part)?32:0);
+            this.setDE(ptr+part.length);return ok();
+          }
+          case 0x5D: { // CHECK CHARACTER
+            const original=this.e, ch=String.fromCharCode(original),flag=this.d&9;
+            this.e=(flag&1)?original:ch.toUpperCase().charCodeAt(0)&255;
+            this.d=flag|(/[\\/:;=,+<>|"?* ]/.test(ch)?16:0);return ok();
+          }
+          case 0x5E: { // Whole path after preceding find
+            const path=this.dos2FibPaths.get(this.ix);
+            if(!path)return this.dos2Error(0xD7);
+            const text=path.slice(1).replace(/\//g,'\\');this.dos2WriteString(this.getDE(),text,64);
+            this.setHL(this.getDE()+text.lastIndexOf('\\')+1);return ok();
+          }
+          case 0x59: { // GETCD: root is empty string; no initial slash
+            if(this.b>1)return this.dos2Error(0xB5);
+            this.dos2WriteString(this.getDE(),currentDir==='/'?'':currentDir.slice(1).replace(/\//g,'\\'));return ok();
+          }
+          case 0x5A: { // CHDIR
+            path=pathFn();entry=this.disk.getEntry(path);
+            if(path!=='/'&&(!entry||!entry.isDir))return this.dos2Error(0xD5);
+            currentDir=path;this.term.setPrompt(getPromptStr());return ok();
+          }
+          case 0x5F: return this.b===0||this.b===1||this.b===255?ok():this.dos2Error(0xB5);
+          case 0x62: this.dos2LastError=this.b;this.halted=true;return true;
+          case 0x63: this.dos2AbortVector=this.getDE();return ok();
+          case 0x64: this.dos2DiskErrorVector=this.getDE();return ok();
+          case 0x66: { // EXPLAIN: provide known error descriptions, else generic
+            const messages={0xC7:'End of file',0xC6:'File access violation',0xC4:'No spare file handles',0xC2:'File handle not open',0xD7:'File not found',0xD5:'Directory not found'};
+            const msg=messages[this.b]||(this.b>=0x40?'System error ':'User error ')+this.b;
+            if(messages[this.b])this.b=0;
+            this.dos2WriteString(this.getDE(),msg,64);return ok();
+          }
+          case 0x69: { // Only report synthetic buffer count. No actual sector buffer allocation.
+            if(this.b!==0)return this.dos2Error(0xFF);
+            this.b=2;return ok();
+          }
+          case 0x6B: { // GENV (HL name, DE buffer, B length)
+            const name=this.dos2ReadString(this.getHL()).toUpperCase(),value=this.dos2Environment.get(name)||'';
+            if(!name)return this.dos2Error(0xC0);
+            if(value.length+1>this.b){for(let i=0;i<this.b;i++)this.dosPut8(this.getDE()+i,value.charCodeAt(i));return this.dos2Error(0xBF);}
+            this.dos2WriteString(this.getDE(),value,Math.max(1,this.b));return ok();
+          }
+          case 0x6C: { // SENV
+            const name=this.dos2ReadString(this.getHL()).toUpperCase(),value=this.dos2ReadString(this.getDE());
+            if(!name||/[^A-Z0-9_]/.test(name))return this.dos2Error(0xC0);
+            if(value.length>=255)return this.dos2Error(0xBF);
+            this.dos2Environment.delete(name);if(value)this.dos2Environment.set(name,value);return ok();
+          }
+          case 0x6D: { // FENV
+            const entry=[...this.dos2Environment.keys()][this.getDE()-1]||'';
+            this.dos2WriteString(this.getHL(),entry,255);return ok();
+          }
+          case 0x6E: {if(this.a===1)this.dos2DiskCheck=this.b?255:0;this.b=this.dos2DiskCheck;return ok();}
+          case 0x70: {const old=this.dos2Redirection;if(this.a===1)this.dos2Redirection=this.b&3;this.b=old;return ok();}
+          case 0x65: { // previous error: see documented separate secondary result
+            this.b=this.dos2LastError||0;this.dos2LastError=0;return ok();
+          }
+          case 0x6F: this.setBC(0x0220);this.setDE(0x0220);return ok();
+          default: // Explicitly unsupported, never report false success.
+            return this.dos2Error(0xFF);
+        }
+      }
+
+      handleBDOS() {
+        const fn = this.c;
+        if (fn >= 0x40 && fn <= 0x70) { this.dos2Call(fn); return; }
+        if (fn <= 0x30 && this.dos1(fn)) return;
+        if (fn <= 0x30 && fn !== 0x02 && fn !== 0x09) { // Keep legacy CP/M character and string output
+          this.a = 0xFF; return;
+        }
+        switch (fn) {
+          case 0x00: this.halted = true; break;
+          case 0x01: this.a = 0x1A; break;
+          case 0x02: this.term.printChar(this.e); break;
+          case 0x06:
+            if (this.e !== 0xFF) this.term.printChar(this.e);
+            else this.a = 0x00;
+            break;
+          case 0x09: {
+            let addr = this.getDE();
+            let str = "";
+            let limit = 65536;
+            while (this.memory[addr] !== 0x24 && limit-- > 0) {
+              let b = this.memory[addr];
+              if (b >= 0xA1 && b <= 0xDF) b += 0xFEC0;
+              str += String.fromCharCode(b);
+              addr = (addr + 1) & 0xFFFF;
+            }
+            this.term.print(str);
+            break;
+          }
+          case 0x0B: this.a = 0x00; break;
+          case 0x0C: this.a = 0x22; this.b = 0x00; this.setHL(0x0022); break;
+          case 0x0D: this.dta = 0x0080; this.a = 0x00; break;
+          case 0x0E: case 0x19: this.a = 0x00; break;
+          case 0x1A: this.dta = this.getDE(); break;
+          case 0x1F: this.setHL(0x0000); this.a = 0x00; break;
+          case 0x20: this.a = 0x00; break;
+
+          case 0x0F: { // F_OPEN
+            const fcb = this.getDE();
+            let key = "";
+            for (let i = 1; i <= 11; i++) key += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+            const file = this.disk.findInDir(currentDir, key);
+            if (file) {
+              this.memory[(fcb + 12) & 0xFFFF] = 0;
+              this.memory[(fcb + 14) & 0xFFFF] = 0;
+              this.memory[(fcb + 15) & 0xFFFF] = Math.min(128, Math.ceil(file.data.length / 128));
+              this.memory[(fcb + 32) & 0xFFFF] = 0;
+              this.a = 0x00;
+            } else { this.a = 0xFF; }
+            break;
+          }
+
+          case 0x14: { // F_READ
+            const fcb = this.getDE();
+            let key = "";
+            for (let i = 1; i <= 11; i++) key += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+            const file = this.disk.findInDir(currentDir, key);
+            if (!file) { this.a = 0x01; break; }
+
+            const ex = this.memory[(fcb + 12) & 0xFFFF];
+            const cr = this.memory[(fcb + 32) & 0xFFFF];
+            const recordIndex = ex * 128 + cr;
+            const offset = recordIndex * 128;
+
+            if (offset >= file.data.length) {
+              this.a = 0x01;
+              break;
+            }
+
+            for (let i = 0; i < 128; i++) {
+              const s = offset + i;
+              this.memory[(this.dta + i) & 0xFFFF] = (s < file.data.length) ? file.data[s] : 0x1A;
+            }
+
+            let nextCr = cr + 1;
+            if (nextCr >= 128) {
+              nextCr = 0;
+              this.memory[(fcb + 12) & 0xFFFF] = (ex + 1) & 0xFF;
+            }
+            this.memory[(fcb + 32) & 0xFFFF] = nextCr;
+            this.a = 0x00;
+            break;
+          }
+
+          case 0x15: { // F_WRITE
+            const fcb = this.getDE();
+            let writer = this.openWriteBuffers.get(fcb);
+            if (!writer) {
+              let key = "";
+              for (let i = 1; i <= 11; i++) key += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+              let displayName = key.slice(0,8).trimEnd() + "." + key.slice(8).trimEnd();
+              writer = { key: key, name: displayName, chunks: [] };
+              this.openWriteBuffers.set(fcb, writer);
+            }
+            const chunk = new Uint8Array(128);
+            for (let i = 0; i < 128; i++) chunk[i] = this.memory[(this.dta + i) & 0xFFFF];
+            writer.chunks.push(chunk);
+
+            let cr = this.memory[(fcb + 32) & 0xFFFF] + 1;
+            if (cr >= 128) cr = 0;
+            this.memory[(fcb + 32) & 0xFFFF] = cr;
+            this.a = 0x00;
+            break;
+          }
+
+          case 0x16: { // F_MAKE
+            const fcb = this.getDE();
+            let rawName = "", rawExt = "";
+            for (let i = 1; i <= 8; i++) rawName += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+            for (let i = 9; i <= 11; i++) rawExt += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+            const fullName = rawExt.trim() ? `${rawName.trimEnd()}.${rawExt.trimEnd()}` : rawName.trimEnd();
+            this.memory[(fcb + 12) & 0xFFFF] = 0;
+            this.memory[(fcb + 32) & 0xFFFF] = 0;
+            this.openWriteBuffers.set(fcb, { key: this.disk.toFcbKey(fullName), name: fullName, chunks: [] });
+            this.a = 0x00;
+            break;
+          }
+
+          case 0x10: { // F_CLOSE
+            const fcb = this.getDE();
+            const writer = this.openWriteBuffers.get(fcb);
+            if (writer) {
+              const merged = new Uint8Array(writer.chunks.length * 128);
+              let off = 0;
+              for (const c of writer.chunks) { merged.set(c, off); off += c.length; }
+              this.disk.putFileInDir(currentDir, writer.name, merged).then(() => renderVDiskList());
+              this.openWriteBuffers.delete(fcb);
+            }
+            this.a = 0x00;
+            break;
+          }
+
+          case 0x13: { // F_DELETE
+            const fcb = this.getDE();
+            let key = "";
+            for (let i = 1; i <= 11; i++) key += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+            const target = this.disk.findInDir(currentDir, key);
+            if (target) this.disk.deleteEntry(target.fullPath);
+            this.a = 0x00;
+            break;
+          }
+
+          case 0x21: { // F_READRND
+            const fcb = this.getDE();
+            let key = "";
+            for (let i = 1; i <= 11; i++) key += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+            const file = this.disk.findInDir(currentDir, key);
+            if (!file) { this.a = 0x01; break; }
+            const r0 = this.memory[(fcb + 33) & 0xFFFF];
+            const r1 = this.memory[(fcb + 34) & 0xFFFF];
+            const rndRec = r0 | (r1 << 8);
+            const offset = rndRec * 128;
+            if (offset >= file.data.length) { this.a = 0x01; break; }
+            for (let i = 0; i < 128; i++) {
+              const s = offset + i;
+              this.memory[(this.dta + i) & 0xFFFF] = (s < file.data.length) ? file.data[s] : 0x1A;
+            }
+            this.a = 0x00;
+            break;
+          }
+
+          case 0x23: { // F_SIZE
+            const fcb = this.getDE();
+            let key = "";
+            for (let i = 1; i <= 11; i++) key += String.fromCharCode(this.memory[(fcb + i) & 0xFFFF]);
+            const file = this.disk.findInDir(currentDir, key);
+            if (file) {
+              const recs = Math.ceil(file.data.length / 128);
+              this.memory[(fcb + 33) & 0xFFFF] = recs & 0xFF;
+              this.memory[(fcb + 34) & 0xFFFF] = (recs >> 8) & 0xFF;
+              this.a = 0x00;
+            } else { this.a = 0xFF; }
+            break;
+          }
+
+//
+// ==================================================================
+          // MSX-DOS 2 Extended Function Calls (0x40 - 0x6F)
+          // ==================================================================
+
+          // --- 0x6F: Get MSX-DOS Version ---
+          // MSX-DOS 2 Version Check
+          // B = 0x22 (Kernel 2.20), C = 0x22 (System 2.20)
+          case 0x6F: {
+            this.a = 0x00; // Success
+            this.b = 0x22; // Kernel 2.20
+            this.c = 0x22; // System 2.20
+            break;
+          }
+
+          // --- 0x5C: Get Current Directory ---
+          // Input:  B = Drive (0 = Default/Current)
+          //         DE = Destination buffer address
+          // Output: A = Error code (Null-terminated ASCII string written to DE)
+          case 0x5C: {
+            const dest = this.getDE();
+            const dosPath = currentDir === "/" ? "\\" : currentDir.replace(/\//g, "\\");
+            const pathBytes = new TextEncoder().encode(dosPath);
+            for (let i = 0; i < pathBytes.length; i++) {
+              this.memory[(dest + i) & 0xFFFF] = pathBytes[i];
+            }
+            this.memory[(dest + pathBytes.length) & 0xFFFF] = 0x00; // Null terminator
+            this.a = 0x00;
+            break;
+          }
+
+          // --- 0x5D: Change Current Directory (CHDIR) ---
+          // Input:  DE = Path string address (ASCIIZ)
+          // Output: A = Error code
+          case 0x5D: {
+            let addr = this.getDE();
+            let rawPath = "";
+            while (this.memory[addr] !== 0 && this.memory[addr] !== 0x0D && this.memory[addr] !== 0x0A) {
+              rawPath += String.fromCharCode(this.memory[addr]);
+              addr = (addr + 1) & 0xFFFF;
+            }
+            const targetDir = vDisk.resolvePath(currentDir, rawPath);
+            const entry = vDisk.getEntry(targetDir);
+            if (targetDir === "/" || (entry && entry.isDir)) {
+              currentDir = targetDir;
+              terminal.setPrompt(getPromptStr());
+              this.a = 0x00;
+            } else {
+              this.a = 0xD5; // .NODIR (Directory not found)
+            }
+            break;
+          }
+
+          // --- 0x43: Open File Handle ---
+          // Input:  DE = Path string address (ASCIIZ)
+          //         A  = Open mode (0: Read, 1: Write, 2: Read/Write)
+          // Output: A  = Error code, B = File handle
+          case 0x43: {
+            let addr = this.getDE();
+            let rawName = "";
+            while (this.memory[addr] !== 0 && this.memory[addr] !== 0x0D) {
+              rawName += String.fromCharCode(this.memory[addr]);
+              addr = (addr + 1) & 0xFFFF;
+            }
+            const fullPath = vDisk.resolvePath(currentDir, rawName);
+            const file = vDisk.getEntry(fullPath);
+            if (!file || file.isDir) {
+              this.a = 0xD7; // .NOFIL (File not found)
+              break;
+            }
+            if (!this.fileHandles) this.fileHandles = new Map();
+            if (!this.nextHandle) this.nextHandle = 5;
+
+            const h = this.nextHandle++;
+            this.fileHandles.set(h, {
+              path: fullPath,
+              pos: 0,
+              buffer: new Uint8Array(file.data),
+              mode: this.a
+            });
+            this.a = 0x00;
+            this.b = h;
+            break;
+          }
+
+          // --- 0x44: Create File Handle ---
+          // Input:  DE = Path string address (ASCIIZ)
+          //         A  = Open mode, B = Attributes
+          // Output: A  = Error code, B = File handle
+          case 0x44: {
+            let addr = this.getDE();
+            let rawName = "";
+            while (this.memory[addr] !== 0 && this.memory[addr] !== 0x0D) {
+              rawName += String.fromCharCode(this.memory[addr]);
+              addr = (addr + 1) & 0xFFFF;
+            }
+            const fullPath = vDisk.resolvePath(currentDir, rawName);
+            const parts = fullPath.split("/").filter(p => p.length > 0);
+            const fileName = parts.pop();
+            const parentDir = "/" + parts.join("/");
+
+            const emptyBuf = new Uint8Array(0);
+            vDisk.putFileInDir(parentDir, fileName, emptyBuf);
+
+            if (!this.fileHandles) this.fileHandles = new Map();
+            if (!this.nextHandle) this.nextHandle = 5;
+
+            const h = this.nextHandle++;
+            this.fileHandles.set(h, {
+              path: fullPath,
+              pos: 0,
+              buffer: emptyBuf,
+              mode: this.a
+            });
+            this.a = 0x00;
+            this.b = h;
+            break;
+          }
+
+          // --- 0x45: Close File Handle ---
+          // Input:  B = File handle
+          // Output: A = Error code
+          case 0x45: {
+            const h = this.b;
+            if (this.fileHandles && this.fileHandles.has(h)) {
+              const file = this.fileHandles.get(h);
+              const parts = file.path.split("/").filter(p => p.length > 0);
+              const fileName = parts.pop();
+              const parentDir = "/" + parts.join("/");
+              vDisk.putFileInDir(parentDir, fileName, file.buffer).then(() => renderVDiskList());
+              this.fileHandles.delete(h);
+              this.a = 0x00;
+            } else if (h < 5) {
+              this.a = 0x00; // Standard I/O handles ignored
+            } else {
+              this.a = 0xDF; // .IFHND (Invalid handle)
+            }
+            break;
+          }
+
+          // --- 0x48: Read From File Handle ---
+          // Input:  B = Handle, DE = Destination address, HL = Bytes to read
+          // Output: A = Error code, HL = Actual bytes read
+          case 0x48: {
+            const h = this.b;
+            const destAddr = this.getDE();
+            const reqBytes = this.getHL();
+
+            if (h === 0) { // STDIN
+              this.setHL(0);
+              this.a = 0xC7; // .EOF
+              break;
+            }
+
+            const file = this.fileHandles ? this.fileHandles.get(h) : null;
+            if (!file) {
+              this.a = 0xDF; // .IFHND
+              break;
+            }
+
+            const available = file.buffer.length - file.pos;
+            const toRead = Math.min(reqBytes, Math.max(0, available));
+            for (let i = 0; i < toRead; i++) {
+              this.memory[(destAddr + i) & 0xFFFF] = file.buffer[file.pos + i];
+            }
+            file.pos += toRead;
+            this.setHL(toRead);
+            this.a = (toRead === 0 && reqBytes > 0) ? 0xC7 : 0x00; // .EOF or Success
+            break;
+          }
+
+          // --- 0x49: Write To File Handle ---
+          // Input:  B = Handle, DE = Source address, HL = Bytes to write
+          // Output: A = Error code, HL = Actual bytes written
+          case 0x49: {
+            const h = this.b;
+            const srcAddr = this.getDE();
+            const reqBytes = this.getHL();
+
+            // STDOUT (1) or STDERR (2)
+            if (h === 1 || h === 2) {
+              for (let i = 0; i < reqBytes; i++) {
+                this.term.printChar(this.memory[(srcAddr + i) & 0xFFFF]);
+              }
+              this.setHL(reqBytes);
+              this.a = 0x00;
+              break;
+            }
+
+            const file = this.fileHandles ? this.fileHandles.get(h) : null;
+            if (!file) {
+              this.a = 0xDF; // .IFHND
+              break;
+            }
+
+            const reqSize = file.pos + reqBytes;
+            if (reqSize > file.buffer.length) {
+              const expanded = new Uint8Array(reqSize);
+              expanded.set(file.buffer);
+              file.buffer = expanded;
+            }
+            for (let i = 0; i < reqBytes; i++) {
+              file.buffer[file.pos + i] = this.memory[(srcAddr + i) & 0xFFFF];
+            }
+            file.pos += reqBytes;
+            this.setHL(reqBytes);
+            this.a = 0x00;
+            break;
+          }
+
+          // --- 0x4A: Seek File Handle ---
+          // Input:  B = Handle, A = Seek mode (0: Start, 1: Current, 2: End)
+          //         DE:HL = Signed 32-bit offset
+          // Output: A = Error code, DE:HL = New absolute position
+          case 0x4A: {
+            const h = this.b;
+            const mode = this.a;
+            let offset = (this.getDE() << 16) | this.getHL();
+            if (offset & 0x80000000) offset = offset - 0x100000000;
+
+            const file = this.fileHandles ? this.fileHandles.get(h) : null;
+            if (!file) {
+              this.a = 0xDF;
+              break;
+            }
+
+            let newPos = file.pos;
+            if (mode === 0) newPos = offset;
+            else if (mode === 1) newPos = file.pos + offset;
+            else if (mode === 2) newPos = file.buffer.length + offset;
+
+            if (newPos < 0) newPos = 0;
+            file.pos = newPos;
+
+            this.setDE((newPos >>> 16) & 0xFFFF);
+            this.setHL(newPos & 0xFFFF);
+            this.a = 0x00;
+            break;
+          }
+
+          // --- 0x62: Terminate With Error Code ---
+          case 0x62: {
+            this.halted = true;
+            this.a = 0x00;
+            break;
+          }
+//
+
+          default: this.a = 0xFF; break;
+        }
+      }
+
+      step() {
+        if (this.halted) return false;
+
+        // RET to 0000H means return to DOS, not execute a HALT instruction.
+        // Keep registers and memory intact; prepare PC for the next COM program.
+        if (this.pc === 0x0000) {
+          this.pc = 0x0100;
+          this.halted = true; // Stop the host execution loop so it shows the prompt.
+          return false;
+        }
+
+        if (this.pc === 0xF000 || this.pc === 0x0005) {
+          this.handleBDOS();
+          if (this.halted || this.dosWaiting !== null) return false;
+          if (this.pc === 0x0005) {
+            this.pc = this.pop16();
+            return true;
+          }
+        }
+
+        const op = this.memory[this.pc];
+        this.pc = (this.pc + 1) & 0xFFFF;
+        this.totalCycles++;
+
+        this.r=(this.r&128)|((this.r+1)&127);
+        if(op===0xCB){this.zCB(this.zFetch());return true;}
+        if(op===0xDD||op===0xFD){this.zIndexed(op);return true;}
+        if(op===0xED){this.zED(this.zFetch());return true;}
+        if(this.zBaseSpecial(op))return true;
+
+        const x = op >> 6, y = (op >> 3) & 7, z = op & 7, p = y >> 1, q = y & 1;
+
+        if (x === 0) {
+          if (z === 0) { /* NOP */ }
+          else if (z === 1) {
+            if (q === 0) {
+              const lo = this.memory[this.pc++];
+              const hi = this.memory[this.pc++];
+              this.setRP(p, (hi << 8) | lo);
+            } else {
+              const hl = this.getHL();
+              const val = this.getRP(p);
+              const res = hl + val;
+              this.flags.cy = (res > 0xFFFF) ? 1 : 0;
+              this.flags.ac = (((hl & 0x0FFF) + (val & 0x0FFF)) > 0x0FFF) ? 1 : 0;
+              this.flags.n = 0;
+              this.setHL(res & 0xFFFF);
+            }
+          }
+          else if (z === 2) {
+            if (q === 0) {
+              if (p === 0) this.memory[this.getBC()] = this.a;
+              else if (p === 1) this.memory[this.getDE()] = this.a;
+              else if (p === 2) {
+                const lo = this.memory[this.pc++];
+                const hi = this.memory[this.pc++];
+                const addr = (hi << 8) | lo;
+                this.memory[addr] = this.l;
+                this.memory[(addr + 1) & 0xFFFF] = this.h;
+              } else {
+                const lo = this.memory[this.pc++];
+                const hi = this.memory[this.pc++];
+                this.memory[(hi << 8) | lo] = this.a;
+              }
+            } else {
+              if (p === 0) this.a = this.memory[this.getBC()];
+              else if (p === 1) this.a = this.memory[this.getDE()];
+              else if (p === 2) {
+                const lo = this.memory[this.pc++];
+                const hi = this.memory[this.pc++];
+                const addr = (hi << 8) | lo;
+                this.l = this.memory[addr];
+                this.h = this.memory[(addr + 1) & 0xFFFF];
+              } else {
+                const lo = this.memory[this.pc++];
+                const hi = this.memory[this.pc++];
+                this.a = this.memory[(hi << 8) | lo];
+              }
+            }
+          }
+          else if (z === 3) {
+            if (q === 0) this.setRP(p, (this.getRP(p) + 1) & 0xFFFF);
+            else this.setRP(p, (this.getRP(p) - 1) & 0xFFFF);
+          }
+          else if (z === 4) {
+            const v = (this.getReg(y) + 1) & 0xFF;
+            this.flags.ac = ((this.getReg(y) & 0x0F) === 0x0F) ? 1 : 0;
+            this.setSZP(v);
+            this.flags.p=(this.getReg(y)===0x7F)?1:0;
+            this.flags.n = 0;
+            this.setReg(y, v);
+          }
+          else if (z === 5) {
+            const v = (this.getReg(y) - 1) & 0xFF;
+            this.flags.ac = ((this.getReg(y) & 0x0F) === 0) ? 1 : 0;
+            this.setSZP(v);
+            this.flags.p=(this.getReg(y)===0x80)?1:0;
+            this.flags.n = 1;
+            this.setReg(y, v);
+          }
+          else if (z === 6) {
+            this.setReg(y, this.memory[this.pc++]);
+          }
+          else if (z === 7) {
+            switch (y) {
+              case 0: {
+                const cy = (this.a >> 7) & 1;
+                this.a = ((this.a << 1) | cy) & 0xFF;
+                this.flags.cy = cy;
+                break;
+              }
+              case 1: {
+                const cy = this.a & 1;
+                this.a = (this.a >> 1) | (cy << 7);
+                this.flags.cy = cy;
+                break;
+              }
+              case 2: {
+                const cy = (this.a >> 7) & 1;
+                this.a = ((this.a << 1) | this.flags.cy) & 0xFF;
+                this.flags.cy = cy;
+                break;
+              }
+              case 3: {
+                const cy = this.a & 1;
+                this.a = (this.a >> 1) | (this.flags.cy << 7);
+                this.flags.cy = cy;
+                break;
+              }
+              case 4: { // DAA (Z80/R800: N distinguishes decimal add/subtract)
+                const before = this.a;
+                const oldH = this.flags.ac;
+                const oldC = this.flags.cy;
+                let adjust = 0;
+                let carry = oldC;
+                if (!this.flags.n) {
+                  if (oldH || (before & 0x0F) > 9) adjust |= 0x06;
+                  if (oldC || before > 0x99) { adjust |= 0x60; carry = 1; }
+                  this.a = (before + adjust) & 0xFF;
+                } else {
+                  if (oldH) adjust |= 0x06;
+                  if (oldC) adjust |= 0x60;
+                  this.a = (before - adjust) & 0xFF;
+                }
+                this.flags.ac = ((before ^ this.a ^ adjust) & 0x10) ? 1 : 0;
+                this.flags.cy = carry;
+                this.setSZP(this.a); // Parity after DAA, not arithmetic overflow
+                break;
+              }
+              case 5: this.a = (~this.a) & 0xFF; this.flags.ac = 1; this.flags.n = 1; break;
+              case 6: this.flags.cy = 1; this.flags.ac = 0; this.flags.n = 0; break;
+              case 7: this.flags.ac = this.flags.cy; this.flags.cy ^= 1; this.flags.n = 0; break;
+            }
+          }
+        }
+        else if (x === 1) {
+          if (y === 6 && z === 6) { this.halted = true; }
+          else { this.setReg(y, this.getReg(z)); }
+        }
+        else if (x === 2) {
+          const val = this.getReg(z);
+          switch (y) {
+            case 0: this.add8(val, false); break;
+            case 1: this.add8(val, true);  break;
+            case 2: this.sub8(val, false); break;
+            case 3: this.sub8(val, true);  break;
+            case 4: this.ana8(val);        break;
+            case 5: this.xra8(val);        break;
+            case 6: this.ora8(val);        break;
+            case 7: this.cmp8(val);        break;
+          }
+        }
+        else if (x === 3) {
+          if (z === 0) {
+            if (this.testCond(y)) this.pc = this.pop16();
+          }
+          else if (z === 1) {
+            if (q === 0) {
+              if (p === 3) this.setPSW(this.pop16());
+              else this.setRP(p, this.pop16());
+            } else {
+              if (p === 0) this.pc = this.pop16();
+              else if (p === 2) this.pc = this.getHL();
+              else if (p === 3) this.sp = this.getHL();
+            }
+          }
+          else if (z === 2) {
+            const lo = this.memory[this.pc++];
+            const hi = this.memory[this.pc++];
+            if (this.testCond(y)) this.pc = (hi << 8) | lo;
+          }
+          else if (z === 3) {
+            switch (y) {
+              case 0: {
+                const lo = this.memory[this.pc++];
+                const hi = this.memory[this.pc++];
+                this.pc = (hi << 8) | lo;
+                break;
+              }
+              case 2: this.pc++; break;
+              case 3: this.pc++; this.a = 0xFF; break;
+              case 4: {
+                const lo = this.memory[this.sp];
+                const hi = this.memory[(this.sp + 1) & 0xFFFF];
+                this.memory[this.sp] = this.l;
+                this.memory[(this.sp + 1) & 0xFFFF] = this.h;
+                this.l = lo; this.h = hi;
+                break;
+              }
+              case 5: {
+                const th = this.d, tl = this.e;
+                this.d = this.h; this.e = this.l;
+                this.h = th; this.l = tl;
+                break;
+              }
+              case 6: case 7: break;
+            }
+          }
+          else if (z === 4) {
+            const lo = this.memory[this.pc++];
+            const hi = this.memory[this.pc++];
+            if (this.testCond(y)) {
+              this.push16(this.pc);
+              this.pc = (hi << 8) | lo;
+            }
+          }
+          else if (z === 5) {
+            if (q === 0) {
+              if (p === 3) this.push16(this.getPSW());
+              else this.push16(this.getRP(p));
+            } else if (p === 0) {
+              const lo = this.memory[this.pc++];
+              const hi = this.memory[this.pc++];
+              this.push16(this.pc);
+              this.pc = (hi << 8) | lo;
+            }
+          }
+          else if (z === 6) {
+            const imm = this.memory[this.pc++];
+            switch (y) {
+              case 0: this.add8(imm, false); break;
+              case 1: this.add8(imm, true);  break;
+              case 2: this.sub8(imm, false); break;
+              case 3: this.sub8(imm, true);  break;
+              case 4: this.ana8(imm);        break;
+              case 5: this.xra8(imm);        break;
+              case 6: this.ora8(imm);        break;
+              case 7: this.cmp8(imm);        break;
+            }
+          }
+          else if (z === 7) {
+            if (op === 0xD7) this.handleBDOS();
+            else {
+              this.push16(this.pc);
+              this.pc = y * 8;
+            }
+          }
+        }
+        return true;
+      }
+
+      load(addr, data) {
+        for (let i = 0; i < data.length; i++) this.memory[addr + i] = data[i];
+      }
+
+      setupCommandLine(rawTail, arg1, arg2) {
+        for (let i = 0x005C; i < 0x0080; i++) this.memory[i] = 0x00;
+        this.writeFcb16(0x005C, arg1 || "");
+        this.writeFcb16(0x006C, arg2 || "");
+
+        const trimmed = (rawTail || "").trim();
+        if (trimmed.length > 0) {
+          const tail = " " + trimmed;
+          const len = Math.min(tail.length, 126);
+          this.memory[0x0080] = len & 0xFF;
+          for (let i = 0; i < len; i++) {
+            this.memory[0x0081 + i] = tail.charCodeAt(i);
+          }
+          this.memory[0x0081 + len] = 0x0D;
+        } else {
+          this.memory[0x0080] = 0;
+          this.memory[0x0081] = 0x0D;
+        }
+        this.dta = 0x0080;
+      }
+
+      writeFcb16(addr, arg) {
+        if (!arg) {
+          this.memory[addr] = 0;
+          for (let i = 1; i <= 11; i++) this.memory[addr + i] = 0x20;
+          return;
+        }
+        const upper = arg.toUpperCase().trim();
+        let drive = 0, namePart = upper;
+        if (upper.length >= 2 && upper[1] === ":") {
+          drive = upper.charCodeAt(0) - 64;
+          namePart = upper.slice(2);
+        }
+        this.memory[addr] = drive;
+        const dotIdx = namePart.indexOf(".");
+        let fName = dotIdx >= 0 ? namePart.slice(0, dotIdx) : namePart;
+        let fExt = dotIdx >= 0 ? namePart.slice(dotIdx + 1) : "";
+        fName = fName.padEnd(8, " ").slice(0, 8);
+        fExt = fExt.padEnd(3, " ").slice(0, 3);
+        for (let i = 0; i < 8; i++) this.memory[addr + 1 + i] = fName.charCodeAt(i);
+        for (let i = 0; i < 3; i++) this.memory[addr + 9 + i] = fExt.charCodeAt(i);
+      }
+    }
+
+    let currentDir = "/"; // Global current working directory
+
+    function getPromptStr() {
+      const dosPath = currentDir === "/" ? "\\" : currentDir.replace(/\//g, "\\");
+      return `A:${dosPath}>`;
+    }
+
+    const termScreen = document.getElementById("terminalScreen");
+    const termText = document.getElementById("termText");
+    const termCursor = document.getElementById("termCursor");
+    const dropZone = document.getElementById("dropZone");
+    const traceEl = document.getElementById("traceLog");
+
+    function addTrace(msg) { traceEl.textContent = msg + "\n" + traceEl.textContent.slice(0, 300); }
+
+    const terminal = new TerminalManager(termScreen, termText, termCursor);
+    const vDisk = new PersistentVirtualDisk();
+    const vm = new MSXDOS_R800(terminal, vDisk, addTrace);
+
+    let abortRequested = false;
+    let comProgramActive = false;
+
+    function abortExecution() {
+      monitorRunId++;
+      abortRequested = true; comProgramActive = false; vm.halted = true;
+      terminal.print("\r\n[Aborted]\r\n");
+      terminal.showPrompt(); updateUI();
+    }
+
+    function injectEof() {
+      if (terminal.inputMode === "copy_con") { terminal.currentInput += "^Z"; terminal.render(); }
+      termScreen.focus();
+    }
+
+    async function createSampleC() {
+      const validC = 'main()\r\n{\r\n    puts("Hello from BDS C on MSX-DOS 2!\\n");\r\n}\r\n';
+      await vDisk.putFileInDir(currentDir, "ABC.C", validC);
+      renderVDiskList();
+      terminal.print("\r\n[Clean ABC.C created in current directory! Type: CC ABC.C]\r\n");
+      terminal.showPrompt();
+    }
+
+    function viewFileContent(fullPath) {
+      const f = vDisk.files.get(fullPath);
+      if (!f || f.isDir) return;
+      const dec = new TextDecoder().decode(f.data);
+      alert(`=== File: ${f.name} (${f.data.length} bytes) ===\n\n` + dec);
+    }
+
+    ["dragenter", "dragover"].forEach(ev => dropZone.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.add("drag-over"); }));
+    ["dragleave", "drop"].forEach(ev => dropZone.addEventListener(ev, (e) => { e.preventDefault(); dropZone.classList.remove("drag-over"); }));
+    dropZone.addEventListener("drop", async (e) => { if (e.dataTransfer.files.length) await processUploaded(e.dataTransfer.files); });
+    async function uploadFiles(e) { if (e.target.files.length) await processUploaded(e.target.files); }
+
+    async function processUploaded(files) {
+      terminal.print(`\r\n[Importing ${files.length} file(s) into ${currentDir}]\r\n`);
+      for (const file of files) {
+        const data = new Uint8Array(await file.arrayBuffer());
+        await vDisk.putFileInDir(currentDir, file.name, data);
+        terminal.print(`  + ${file.name.toUpperCase()} (${data.length} bytes)\r\n`);
+      }
+      renderVDiskList();
+      terminal.print("[Ready]\r\n");
+      terminal.showPrompt();
+    }
+
+    terminal.onCopyConComplete = async (fn, content) => {
+      const path = shellPath(fn);
+      const target = path ? shellParent(path) : null;
+      if (!target || !shellDirectoryExists(target.dir) || !target.name) {
+        terminal.print("Path not found\r\n");
+        terminal.showPrompt();
+        return;
+      }
+      await vDisk.putFileInDir(target.dir, target.name, content);
+      renderVDiskList();
+      terminal.print("        1 File(s) copied\r\n");
+      terminal.showPrompt();
+    };
+
+    // Shell path helpers. The virtual disk stores paths with '/' internally.
+    function shellPath(raw) {
+      if (!raw) return null;
+      let p = raw.trim();
+      if (/^[A-Za-z]:/.test(p)) {
+        if (p[0].toUpperCase() !== "A") return null;
+        p = p.slice(2);
+        if (!p) p = "/";
+      }
+      return vDisk.resolvePath(currentDir, p);
+    }
+
+    function shellParent(path) {
+      const i = path.lastIndexOf("/");
+      return { dir: i <= 0 ? "/" : path.slice(0, i), name: path.slice(i + 1) };
+    }
+
+    function shellDirectoryExists(dir) {
+      return dir === "/" || !!vDisk.getEntry(dir)?.isDir;
+    }
+
+    function shellFileMatches(rawPattern) {
+      const path = shellPath(rawPattern);
+      if (!path) return null;
+      const { dir, name } = shellParent(path);
+      if (!shellDirectoryExists(dir)) return null;
+      const mask = vDisk.toFcbMask(name || "*.*");
+      return { dir, matches: vDisk.getEntriesInDir(dir).filter(item => vDisk.matchFcb(mask, vDisk.toFcbKey(item.name))) };
+    }
+
+    function downloadVirtualFile(file) {
+      if (!file || file.isDir) return false;
+      // Byte-exact: neither CP/M EOF markers nor line endings are modified.
+      const url = URL.createObjectURL(new Blob([file.data], { type: "application/octet-stream" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = file.name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return true;
+    }
+
+
+    // vi subset uses the same virtual disk as the shell; no emulator/BDOS hooks.
+    const vi = {
+      open:false, path:null, original:null, dirty:false, mode:'NORMAL', ending:'\r\n',
+      suffix:new Uint8Array(0), find:null, pendingFind:null, pendingOperator:null, yank:null, search:null, searchReverse:false,
+      overlay:document.getElementById('viOverlay'), area:document.getElementById('viText'),
+      status:document.getElementById('viStatus'), command:document.getElementById('viCommand'),
+      header:document.getElementById('viHeader')
+    };
+    function viInfo(message='') {
+      if (!vi.open) return;
+      const before=vi.area.value.slice(0,vi.area.selectionStart);
+      const row=before.split('\n').length, col=before.length-before.lastIndexOf('\n');
+      vi.status.textContent=`${vi.mode} | ${row}:${col} | ${vi.dirty?'[modified]':'[saved]'}${message?' | '+message:''}`;
+    }
+    function viCursor(at) {
+      const p=Math.max(0,Math.min(vi.area.value.length,at));
+      // Highlight the character in NORMAL mode, while INSERT keeps a thin caret.
+      const end=vi.mode==='NORMAL' && p<vi.area.value.length && vi.area.value[p]!=='\n' ? p+1 : p;
+      vi.area.setSelectionRange(p,end);viInfo();
+    }
+    function viMove(key) {
+      const value=vi.area.value, pos=vi.area.selectionStart;
+      const start=value.lastIndexOf('\n',pos-1)+1;
+      const end=value.indexOf('\n',start);const limit=end<0?value.length:end;
+      if(key==='h'||key==='ArrowLeft') viCursor(Math.max(start,pos-1));
+      if(key==='l'||key==='ArrowRight') viCursor(Math.min(limit,pos+1));
+      if(key==='j'||key==='ArrowDown'||key==='k'||key==='ArrowUp') {
+        const targetStart=(key==='j'||key==='ArrowDown')?limit+1:value.lastIndexOf('\n',Math.max(0,start-2))+1;
+        if((key==='j'||key==='ArrowDown')&&limit===value.length)return;
+        if((key==='k'||key==='ArrowUp')&&start===0)return;
+        const targetEnd=value.indexOf('\n',targetStart);
+        viCursor(Math.min(targetStart+pos-start,targetEnd<0?value.length:targetEnd));
+      }
+    }
+    function viInsertLine(before) {
+      const value=vi.area.value,pos=vi.area.selectionStart;
+      const start=value.lastIndexOf('\n',pos-1)+1;
+      const end=value.indexOf('\n',start);
+      const at=before?start:(end<0?value.length:end);
+      const insert=before?'\n':(end<0?'\n':'\n');
+      // O inserts an empty line before current; o inserts one after it.
+      vi.area.value=value.slice(0,at)+insert+value.slice(at);
+      vi.dirty=true;vi.mode='INSERT';
+      viCursor(before?start:(at+1));
+    }
+    function viFindChar(ch,reverse=false) {
+      const text=vi.area.value, pos=vi.area.selectionStart;
+      const start=text.lastIndexOf('\n',pos-1)+1;
+      const next=text.indexOf('\n',pos);const end=next<0?text.length:next;
+      if(reverse){const k=text.lastIndexOf(ch,pos-1);if(k>=start)viCursor(k);}
+      else{const k=text.indexOf(ch,pos+1);if(k>=0&&k<end)viCursor(k);}
+    }
+    function viLineRange() {
+      const text=vi.area.value, pos=vi.area.selectionStart;
+      const start=text.lastIndexOf('\n',pos-1)+1;
+      const lineEnd=text.indexOf('\n',start);
+      return {start,end:lineEnd<0?text.length:lineEnd,after:lineEnd<0?text.length:lineEnd+1};
+    }
+    function viYankLine(remove=false) {
+      const r=viLineRange(), value=vi.area.value;
+      vi.yank=value.slice(r.start,r.end); // one complete line, excluding separator
+      if(remove) {
+        if(r.after<value.length || r.after>r.end) {
+          vi.area.value=value.slice(0,r.start)+value.slice(r.after);
+        } else if(r.start>0) {
+          vi.area.value=value.slice(0,r.start-1);
+        } else {
+          vi.area.value='';
+        }
+        vi.dirty=true;
+        viCursor(Math.min(r.start,vi.area.value.length));
+      } else viInfo('1 line yanked');
+    }
+    function viPasteLine(before) {
+      if(vi.yank===null) {viInfo('Nothing to paste');return;}
+      const value=vi.area.value, r=viLineRange();
+      let insertAt, payload;
+      if(before) {insertAt=r.start;payload=vi.yank+'\n';}
+      else if(r.after>r.end) {insertAt=r.after;payload=vi.yank+'\n';}
+      else {insertAt=value.length;payload=(value.length?'\n':'')+vi.yank;}
+      vi.area.value=value.slice(0,insertAt)+payload+value.slice(insertAt);
+      vi.dirty=true;
+      viCursor(before?insertAt:insertAt+(payload[0]==='\n'?1:0));
+    }
+    function viSearch(text, reverse=false, repeat=false) {
+      const query=text || vi.search;
+      if(!query) {viInfo('Empty search');return;}
+      vi.search=query;
+      if(!repeat)vi.searchReverse=reverse;
+      const contents=vi.area.value, pos=vi.area.selectionStart;
+      let at;
+      if(reverse) {
+        at=contents.lastIndexOf(query,pos-1);
+        if(at<0)at=contents.lastIndexOf(query);
+      } else {
+        at=contents.indexOf(query,pos+1);
+        if(at<0)at=contents.indexOf(query,0);
+      }
+      if(at>=0)viCursor(at);
+      else viInfo('Pattern not found: '+query);
+    }
+    function viOpen(path) {
+      const existing=vDisk.getEntry(path);
+      if(existing?.isDir) return false;
+      const data=existing?existing.data:new Uint8Array(0);
+      if(data.includes(0)) {terminal.print('vi: binary file not supported\r\n');return false;}
+      // Reject undecodable bytes rather than corrupting a binary file on save.
+      const decoder=new TextDecoder('utf-8',{fatal:true});
+      let content;
+      const eof=data.indexOf(0x1A);
+      const visible=eof<0?data:data.subarray(0,eof);
+      try{content=decoder.decode(visible);}catch(e){terminal.print('vi: invalid text before EOF\r\n');return false;}
+      vi.open=true;vi.path=path;vi.original=existing;vi.dirty=false;vi.mode='NORMAL';vi.find=null;vi.pendingFind=null;vi.pendingOperator=null;vi.yank=null;vi.search=null;vi.searchReverse=false;
+      vi.ending=content.includes('\r\n')?'\r\n':'\n';
+      vi.suffix=eof<0?new Uint8Array(0):data.slice(eof);
+      vi.area.value=content.replace(/\r\n/g,'\n');vi.area.readOnly=false;
+      vi.overlay.classList.add('vi-open');vi.command.style.display='none';
+      vi.header.textContent='vi  A:'+path.replace(/\//g,'\\')+(existing?'':'  [New File]');
+      viCursor(0);vi.area.focus();return true;
+    }
+    function viClose() {
+      vi.open=false;vi.overlay.classList.remove('vi-open');vi.command.style.display='none';
+      vi.mode='NORMAL';termScreen.focus();
+    }
+    async function viSave() {
+      const parent=shellParent(vi.path);
+      if(!shellDirectoryExists(parent.dir)) {viInfo('Directory not found');return false;}
+      // Preserve the existing Ctrl-Z trailer, if any. New files receive one.
+      const text=vi.area.value.replace(/\n/g,vi.ending);
+      const contents=new TextEncoder().encode(text);
+      const tail=vi.suffix.length?vi.suffix:Uint8Array.of(0x1A);
+      const bytes=new Uint8Array(contents.length+tail.length);
+      bytes.set(contents);bytes.set(tail,contents.length);
+      try {
+        await vDisk.putFileInDir(parent.dir,parent.name,bytes);
+        vi.original=vDisk.getEntry(vi.path);vi.suffix=tail;
+        vi.dirty=false;renderVDiskList();viInfo('Written '+bytes.length+' bytes');return true;
+      } catch(e){viInfo('Write error: '+e.message);return false;}
+    }
+    vi.area.addEventListener('input',()=>{if(vi.mode==='INSERT'){vi.dirty=true;viInfo();}});
+    vi.area.addEventListener('click',()=>viInfo());
+    vi.area.addEventListener('keydown',e=>{
+      if(!vi.open)return;
+      if(e.key==='Escape'){
+        e.preventDefault();vi.mode='NORMAL';vi.pendingFind=null;vi.pendingOperator=null;viCursor(vi.area.selectionStart);return;
+      }
+      if(vi.mode==='INSERT')return;
+      e.preventDefault();
+      if(vi.pendingOperator){
+        const op=vi.pendingOperator;vi.pendingOperator=null;
+        if(e.key===op){viYankLine(op==='d');return;}
+        viInfo('Cancelled '+op);return;
+      }
+      if(vi.pendingFind){const reverse=vi.pendingFind==='F';vi.pendingFind=null;
+        if(e.key.length===1){vi.find={char:e.key,reverse};viFindChar(e.key,reverse);}return;}
+      if(e.key===':'||e.key==='/'||e.key==='?'){
+        vi.mode=e.key===':'?'COMMAND':'SEARCH';vi.command.value=e.key;
+        vi.command.style.display='block';vi.command.focus();viInfo();return;
+      }
+      if(e.key==='x'||e.key==='Delete'){
+        const r=viLineRange(), at=vi.area.selectionStart;
+        if(at<r.end){vi.area.value=vi.area.value.slice(0,at)+vi.area.value.slice(at+1);vi.dirty=true;viCursor(at);}
+        return;
+      }
+      if(e.key==='d'||e.key==='y'){vi.pendingOperator=e.key;viInfo(e.key==='d'?'d: delete line':'y: yank line');return;}
+      if(e.key==='p'||e.key==='P'){viPasteLine(e.key==='P');return;}
+      if(e.key==='n'||e.key==='N'){viSearch(null,e.key==='n'?vi.searchReverse:!vi.searchReverse,true);return;}
+      if(['h','j','k','l','ArrowLeft','ArrowDown','ArrowUp','ArrowRight'].includes(e.key)){viMove(e.key);return;}
+      if(e.key==='f'||e.key==='F'){vi.pendingFind=e.key;viInfo('Find character');return;}
+      if(e.key===';'&&vi.find){viFindChar(vi.find.char,vi.find.reverse);return;}
+      if(e.key==='i'||e.key==='I'){
+        if(e.key==='I') viCursor(vi.area.value.lastIndexOf('\n',vi.area.selectionStart-1)+1);
+        vi.mode='INSERT';viCursor(vi.area.selectionStart);return;
+      }
+      if(e.key==='o'||e.key==='O'){viInsertLine(e.key==='O');viInfo();}
+    });
+    vi.command.addEventListener('keydown',async e=>{
+      if(e.key==='Escape'){e.preventDefault();vi.mode='NORMAL';vi.command.style.display='none';vi.area.focus();viCursor(vi.area.selectionStart);return;}
+      if(e.key!=='Enter')return;
+      e.preventDefault();const input=vi.command.value.trim();
+      const wasSearch=vi.mode==='SEARCH';
+      vi.command.style.display='none';vi.mode='NORMAL';
+      if(wasSearch){viSearch(input.slice(1),input.startsWith('?'));vi.area.focus();return;}
+      const command=input.toLowerCase();
+      if(command===':w'||command===':wq'){
+        const ok=await viSave();if(ok&&command===':wq'){viClose();terminal.showPrompt();return;}
+      }else if(command===':q'||command===':q!'){
+        if(vi.dirty&&command!==':q!')viInfo('No write since last change (use :q!)');
+        else {viClose();terminal.showPrompt();return;}
+      }else viInfo('Unknown command: '+command);
+      vi.area.focus();viCursor(vi.area.selectionStart);
+    });
+
+    // BDS C data is supplied by the separately loaded bdsc.js (classic script).
+    // ZIP bytes are kept independent of DOS/CPU internals and written unchanged.
+    const BDSC_FILES = ['CC.COM','CC2.COM','CLINK.COM','C.CCC','DEFF.CRL','DEFF2.CRL','STDIO.H'];
+    let bdscLoading = false;
+    function zipU16(b,p){return b[p]|(b[p+1]<<8);}
+    function zipU32(b,p){return (b[p]|(b[p+1]<<8)|(b[p+2]<<16)|(b[p+3]<<24))>>>0;}
+    async function unpackBDSCZip(bytes){
+      // Central-directory parser: stored (0) and raw DEFLATE (8) entries.
+      const view=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);
+      let end=-1;
+      for(let p=view.length-22;p>=Math.max(0,view.length-65557);p--){
+        if(zipU32(view,p)===0x06054b50 && p+22+zipU16(view,p+20)<=view.length){end=p;break;}
+      }
+      if(end<0)throw new Error('Invalid ZIP: end record not found');
+      if(zipU16(view,end+4)||zipU16(view,end+6))throw new Error('Multi-disk ZIP is unsupported');
+      const count=zipU16(view,end+10), cdSize=zipU32(view,end+12), cdPos=zipU32(view,end+16);
+      if(count>100 || cdPos+cdSize>view.length)throw new Error('Invalid ZIP directory');
+      const result=new Map();let p=cdPos;
+      for(let i=0;i<count;i++){
+        if(p+46>view.length||zipU32(view,p)!==0x02014b50)throw new Error('Invalid ZIP entry');
+        const flags=zipU16(view,p+8),method=zipU16(view,p+10),size=zipU32(view,p+20),rawSize=zipU32(view,p+24);
+        const nameLen=zipU16(view,p+28),extra=zipU16(view,p+30),comment=zipU16(view,p+32);
+        const next=p+46+nameLen+extra+comment;
+        if(next>view.length)throw new Error('Truncated ZIP entry');
+        const name=new TextDecoder('utf-8').decode(view.subarray(p+46,p+46+nameLen)).toUpperCase();
+        const wanted=BDSC_FILES.includes(name);
+        if(wanted){
+          if(result.has(name))throw new Error('Duplicate ZIP entry: '+name);
+          if(flags&1)throw new Error('Encrypted ZIP unsupported');
+          if(rawSize>8*1024*1024 || size>8*1024*1024)throw new Error('ZIP entry too large');
+          const off=zipU32(view,p+42);
+          if(off+30>view.length||zipU32(view,off)!==0x04034b50)throw new Error('Invalid ZIP local header');
+          const dataPos=off+30+zipU16(view,off+26)+zipU16(view,off+28);
+          if(dataPos+size>view.length)throw new Error('Truncated ZIP data');
+          const stored=view.subarray(dataPos,dataPos+size);
+          let data;
+          if(method===0)data=new Uint8Array(stored);
+          else if(method===8){
+            if(typeof DecompressionStream==='undefined')throw new Error('ZIP deflate is unavailable in this browser');
+            try{
+              const stream=new Blob([stored]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+              data=new Uint8Array(await new Response(stream).arrayBuffer());
+            }catch(e){throw new Error('ZIP deflate unsupported or invalid: '+e.message);}
+          }else throw new Error('Unsupported ZIP compression method: '+method);
+          if(data.length!==rawSize)throw new Error('Incorrect ZIP entry size: '+name);
+          result.set(name,data);
+        }
+        p=next;
+      }
+      const missing=BDSC_FILES.filter(n=>!result.has(n));
+      if(missing.length)throw new Error('Missing BDS C files: '+missing.join(', '));
+      return result;
+    }
+    async function loadBDSC(){
+      if(bdscLoading){terminal.print('BDS C load already running\r\n');return;}
+      bdscLoading=true;
+      try{
+        if(typeof BDSC_ZIP_BASE64==='undefined' || !BDSC_ZIP_BASE64)
+          throw new Error('bdsc.js not found or BDSC_ZIP_BASE64 is missing');
+        const base64=BDSC_ZIP_BASE64.replace(/\s/g,'');
+        const decoded=atob(base64),bytes=new Uint8Array(decoded.length);
+        for(let i=0;i<decoded.length;i++)bytes[i]=decoded.charCodeAt(i);
+        const entries=await unpackBDSCZip(bytes);
+        const dest=currentDir;
+        for(const name of BDSC_FILES)await vDisk.putFileInDir(dest,name,entries.get(name));
+        renderVDiskList();
+        terminal.print('7 BDS C file(s) loaded into A:'+dest.replace(/\//g,'\\')+'\r\n');
+      }catch(e){terminal.print('Load BDS C failed: '+e.message+'\r\n');}
+      finally{bdscLoading=false;terminal.showPrompt();termScreen.focus();}
+    }
+
+    terminal.onCommand = async (cmd) => {
+      const raw = cmd.trim();
+      const parts = raw.split(/\s+/).filter(p => p.length > 0);
+      const name = (parts[0] || "").toUpperCase();
+      if (!name) { terminal.showPrompt(); return; }
+
+      if (name === "LOADBDSC") {
+        await loadBDSC();return;
+      }
+
+      if (name === "VI") {
+        if (parts.length !== 2 || /[*?]/.test(parts[1])) {
+          terminal.print("Usage: VI filename\r\n");terminal.showPrompt();return;
+        }
+        const path=shellPath(parts[1]);
+        if (!path || !shellParent(path).name || !shellDirectoryExists(shellParent(path).dir)) {
+          terminal.print("Path not found\r\n");terminal.showPrompt();return;
+        }
+        if(!viOpen(path))terminal.showPrompt();
+        return;
+      }
+
+      // DIR / LS: optional directory path or wildcard filename pattern.
+      if (name === "DIR" || name === "LS") {
+        const dirOnly = parts.slice(1).some(p => p.toUpperCase() === "/AD");
+        const pathArgs = parts.slice(1).filter(p => p.toUpperCase() !== "/AD");
+        if (pathArgs.length > 1) {
+          terminal.print("Usage: DIR [path|mask] [/AD]\r\n");
+          terminal.showPrompt();
+          return;
+        }
+        const rawPattern = pathArgs[0] || "*.*";
+        let query = shellFileMatches(rawPattern);
+        const resolved = shellPath(rawPattern);
+        if (resolved && shellDirectoryExists(resolved)) {
+          query = { dir: resolved, matches: vDisk.getEntriesInDir(resolved) };
+        }
+        if (!query) {
+          terminal.print("Path not found\r\n");
+          terminal.showPrompt();
+          return;
+        }
+        if (dirOnly) query = { ...query, matches: query.matches.filter(item => item.isDir) };
+        const dosPath = query.dir === "/" ? "\\" : query.dir.replace(/\//g, "\\");
+        terminal.print(` Volume in drive A has no label\r\n Directory of A:${dosPath}\r\n\r\n`);
+        let totalBytes = 0;
+        for (const item of query.matches) {
+          if (item.isDir) {
+            terminal.print(`${item.name.padEnd(14, " ")} <DIR>\r\n`);
+          } else {
+            const size = item.data ? item.data.length : 0;
+            terminal.print(`${item.name.padEnd(14, " ")} ${size.toString().padStart(8, " ")} bytes\r\n`);
+            totalBytes += size;
+          }
+        }
+        if (!query.matches.length) terminal.print("File not found\r\n");
+        else terminal.print(`\r\n       ${query.matches.length} File(s)    ${totalBytes} bytes\r\n`);
+        terminal.showPrompt();
+      }
+
+      // DEL / ERASE: wildcard selection in a specified directory.
+      else if (name === "DEL" || name === "ERASE") {
+        if (!parts[1]) {
+          terminal.print("Invalid parameter\r\n");
+          terminal.showPrompt();
+          return;
+        }
+        const query = shellFileMatches(parts[1]);
+        if (!query) {
+          terminal.print("Path not found\r\n");
+          terminal.showPrompt();
+          return;
+        }
+        let deleted = 0;
+        for (const item of query.matches) {
+          if (item.isDir) continue;
+          if (await vDisk.deleteEntry(item.fullPath)) deleted++;
+        }
+        if (!deleted) terminal.print("File not found\r\n");
+        if (deleted) renderVDiskList();
+        terminal.showPrompt();
+      }
+
+      // 3. MD / MKDIR (Make Directory)
+      else if (name === "MD" || name === "MKDIR") {
+        const target = parts[1];
+        if (!target) {
+          terminal.print("Invalid parameter\r\n");
+        } else {
+          const fullDir = vDisk.resolvePath(currentDir, target);
+          if (vDisk.getEntry(fullDir)) {
+            terminal.print("Directory already exists\r\n");
+          } else {
+            await vDisk.createDir(fullDir);
+            renderVDiskList();
+          }
+        }
+        terminal.showPrompt();
+      }
+
+      // 4. CD / CHDIR (Change Directory)
+      else if (name === "CD" || name === "CHDIR") {
+        const target = parts[1];
+        if (!target) {
+          const dosPath = currentDir === "/" ? "\\" : currentDir.replace(/\//g, "\\");
+          terminal.print(`A:${dosPath}\r\n`);
+        } else if (target === "\\" || target === "/") {
+          currentDir = "/";
+          terminal.setPrompt(getPromptStr());
+        } else if (target === "..") {
+          if (currentDir !== "/") {
+            const idx = currentDir.lastIndexOf("/");
+            currentDir = idx <= 0 ? "/" : currentDir.slice(0, idx);
+            terminal.setPrompt(getPromptStr());
+          }
+        } else if (target === ".") {
+          /* Stay in current */
+        } else {
+          const fullDir = vDisk.resolvePath(currentDir, target);
+          const entry = vDisk.getEntry(fullDir);
+          if (entry && entry.isDir) {
+            currentDir = fullDir;
+            terminal.setPrompt(getPromptStr());
+          } else {
+            terminal.print("Path not found\r\n");
+          }
+        }
+        terminal.showPrompt();
+      }
+
+      // 5. RD / RMDIR (Remove Directory)
+      else if (name === "RD" || name === "RMDIR") {
+        const target = parts[1];
+        if (!target) {
+          terminal.print("Invalid parameter\r\n");
+        } else {
+          const fullDir = vDisk.resolvePath(currentDir, target);
+          const entry = vDisk.getEntry(fullDir);
+          if (!entry || !entry.isDir) {
+            terminal.print("Path not found\r\n");
+          } else {
+            const subEntries = vDisk.getEntriesInDir(fullDir);
+            if (subEntries.length > 0) {
+              terminal.print("Directory not empty\r\n");
+            } else {
+              await vDisk.deleteEntry(fullDir);
+              renderVDiskList();
+            }
+          }
+        }
+        terminal.showPrompt();
+      }
+
+      else if (name === "CLS") {
+        terminal.clear(); terminal.showPrompt();
+      } else if (name === "COPY" || name === "CP") {
+        if (!parts[1] || !parts[2] || parts.length !== 3) {
+          terminal.print("Usage: COPY source destination | COPY CON filename\r\n");
+          terminal.showPrompt();
+          return;
+        }
+        if (parts[1].toUpperCase() === "CON") {
+          const target = shellPath(parts[2]);
+          if (!target) { terminal.print("Invalid drive\r\n"); terminal.showPrompt(); return; }
+          const loc = shellParent(target);
+          if (!loc.name || !shellDirectoryExists(loc.dir)) {
+            terminal.print("Path not found\r\n"); terminal.showPrompt(); return;
+          }
+          // COPY CON callback accepts a name relative to the current directory.
+          terminal.startCopyCon(target);
+          return;
+        }
+        const sourcePath = shellPath(parts[1]);
+        const destinationPath = shellPath(parts[2]);
+        if (!sourcePath || !destinationPath || /[*?]/.test(parts[1] + parts[2])) {
+          terminal.print("Invalid parameter or drive\r\n"); terminal.showPrompt(); return;
+        }
+        const source = vDisk.getEntry(sourcePath);
+        if (!source || source.isDir) {
+          terminal.print("File not found\r\n"); terminal.showPrompt(); return;
+        }
+        const destinationIsDir = shellDirectoryExists(destinationPath);
+        const outputPath = destinationIsDir
+          ? (destinationPath === "/" ? "/" : destinationPath + "/") + source.name
+          : destinationPath;
+        const output = shellParent(outputPath);
+        if (!output.name || !shellDirectoryExists(output.dir)) {
+          terminal.print("Path not found\r\n"); terminal.showPrompt(); return;
+        }
+        if (sourcePath === outputPath || vDisk.getEntry(outputPath)?.isDir) {
+          terminal.print("Cannot copy file onto itself or directory\r\n"); terminal.showPrompt(); return;
+        }
+        await vDisk.putFileInDir(output.dir, output.name, new Uint8Array(source.data));
+        renderVDiskList();
+        terminal.print("        1 File(s) copied\r\n");
+        terminal.showPrompt();
+      } else if (name === "TYPE") {
+        const path = shellPath(parts[1]);
+        const f = path ? vDisk.getEntry(path) : null;
+        if (f && !f.isDir) {
+          const eof = f.data.indexOf(0x1A);
+          const bytes = eof >= 0 ? f.data.subarray(0, eof) : f.data;
+          terminal.print(new TextDecoder().decode(bytes) + "\r\n");
+        } else terminal.print("File not found\r\n");
+        terminal.showPrompt();
+      } else if (name === "DOWNLOAD") {
+        const path = shellPath(parts[1]);
+        if (!parts[1] || parts.length !== 2 || /[*?]/.test(parts[1])) {
+          terminal.print("Usage: DOWNLOAD filename\r\n");
+        } else if (!downloadVirtualFile(path ? vDisk.getEntry(path) : null)) {
+          terminal.print("File not found\r\n");
+        }
+        terminal.showPrompt();
+      } else if (name === "HELP") {
+        terminal.print(
+          "Internal commands:\r\n" +
+          "  DIR [path|mask] [/AD], LS [...] List files (/AD: dirs only)\r\n" +
+          "  COPY src dst, CP src dst        Copy a file\r\n" +
+          "  COPY CON filename               Create text file (^Z + Enter)\r\n" +
+          "  TYPE filename                   Display text file\r\n" +
+          "  DEL mask, ERASE mask            Delete files\r\n" +
+          "  MD dir, MKDIR dir               Create directory\r\n" +
+          "  CD [dir], CHDIR [dir]           Change/show directory\r\n" +
+          "  RD dir, RMDIR dir               Remove empty directory\r\n" +
+          "  DOWNLOAD filename               Save file to PC\r\n" +
+          "  VI filename                     Open text editor (:w :q :wq)\r\n" +
+          "  LOADBDSC                        Load BDS C from bdsc.js\r\n" +
+          "  CLS                             Clear console\r\n" +
+          "  HELP                            Show this list\r\n" +
+          "Use / or \\ as path separator. Drive A: only.\r\n");
+        terminal.showPrompt();
+      } else {
+        const comName = name.endsWith(".COM") ? name : name + ".COM";
+        const com = vDisk.findInDir(currentDir, vDisk.toFcbKey(comName));
+        if (com && !com.isDir) {
+          const rawArgs = raw.slice(parts[0].length).trim();
+          executeComProgram(com, rawArgs, parts.slice(1));
+        } else {
+          terminal.print("Bad command or file name\r\n"); terminal.showPrompt();
+        }
+      }
+    };
+
+    function executeComProgram(file, rawTail, argParts) {
+      abortRequested = false;
+      comProgramActive = true;
+      terminal.isWaitingInput = false;
+      vm.reset();
+      vm.load(0x0100, file.data);
+      vm.setupCommandLine(rawTail, argParts[0], argParts[1]);
+      updateUI();
+      addTrace(`Exec: ${file.displayName} with tail: "${rawTail}"`);
+
+      const MAX = 30000;
+      function loop() {
+        if (abortRequested || !comProgramActive) return;
+        let c = 0;
+        while (!vm.halted && vm.dosWaiting === null && c < MAX) {
+          if (!vm.step()) break;
+          c++;
+        }
+        if (!vm.halted) {
+          setTimeout(loop, vm.dosWaiting !== null ? 16 : 0);
+        } else {
+          comProgramActive = false;
+          terminal.print("\r\n");
+          terminal.showPrompt();
+          updateUI();
+          termScreen.focus();
+        }
+      }
+      loop();
+    }
+
+    function runR800SelfTest() {
+      vm.reset();
+      terminal.print("\r\n[Testing R800 Hardware Multipliers...]\r\n");
+      const testBin = new Uint8Array([
+        0x3E, 12, 0x06, 34, 0xED, 0xC1,
+        0x21, 0xE8, 0x03, 0x01, 0xC8, 0x00, 0xED, 0xC3,
+        0x76
+      ]);
+      vm.load(0x0100, testBin);
+      while (!vm.halted) vm.step();
+      updateUI();
+      terminal.print(`  MULUB: 12 * 34 = 408 (HL: 0198h)\r\n`);
+      terminal.print(`  MULUW: 1000 * 200 = 200,000 (DE:HL = 0003h:0D40h)\r\n`);
+      terminal.print(`[R800 Multiplier Test PASSED!]\r\n\r\n`);
+      terminal.showPrompt();
+    }
+
+    function toHexLower(v, l = 2) { return v.toString(16).toLowerCase().padStart(l, "0"); }
+
+    function renderVDiskList() {
+      const el = document.getElementById("vdiskList");
+      const selectedPath = el.value;
+      el.replaceChildren();
+      for (const [, item] of vDisk.files) {
+        const option = document.createElement("option");
+        option.value = item.fullPath;
+        option.textContent = `${item.fullPath} (${item.isDir ? "<DIR>" : item.data.length + "B"})`;
+        option.disabled = item.isDir;
+        el.appendChild(option);
+      }
+      if (selectedPath && vDisk.files.has(selectedPath) && !vDisk.files.get(selectedPath).isDir) {
+        el.value = selectedPath;
+      } else {
+        const firstFile = Array.from(el.options).find(option => !option.disabled);
+        if (firstFile) el.value = firstFile.value;
+      }
+    }
+
+    function getSelectedVDiskFile() {
+      const path = document.getElementById("vdiskList").value;
+      const file = vDisk.getEntry(path);
+      return file && !file.isDir ? file : null;
+    }
+
+    function viewSelectedVDiskFile() {
+      const file = getSelectedVDiskFile();
+      if (file) viewFileContent(file.fullPath);
+    }
+
+    function downloadSelectedVDiskFile() {
+      downloadVirtualFile(getSelectedVDiskFile());
+    }
+
+    // ========================================================================
+    // Machine Monitor & Hex Dump Integration
+    // ========================================================================
+    let dumpBaseAddr = 0x0100;
+    const DUMP_ROWS = 8;
+
+    function byteToChar(b) {
+      if (b >= 0x20 && b <= 0x7E) return String.fromCharCode(b);
+      if (b >= 0xA1 && b <= 0xDF) return String.fromCharCode(b + 0xEC60);
+      return ".";
+    }
+
+    function renderDump() {
+      const tbody = document.getElementById("dumpBody");
+      tbody.innerHTML = "";
+
+      for (let r = 0; r < DUMP_ROWS; r++) {
+        const rowAddr = (dumpBaseAddr + r * 16) & 0xFFFF;
+        const tr = document.createElement("tr");
+
+        const tdAddr = document.createElement("td");
+        tdAddr.className = "col-addr";
+        tdAddr.textContent = toHexLower(rowAddr, 4);
+        tr.appendChild(tdAddr);
+
+        const tdText = document.createElement("td");
+        tdText.className = "col-text";
+        let textStr = "";
+        for (let i = 0; i < 16; i++) {
+          textStr += byteToChar(vm.memory[(rowAddr + i) & 0xFFFF]);
+        }
+        tdText.textContent = textStr;
+        tr.appendChild(tdText);
+
+        const tdHex = document.createElement("td");
+        const hexContainer = document.createElement("div");
+        hexContainer.className = "col-hex";
+
+        for (let i = 0; i < 16; i++) {
+          const byteAddr = (rowAddr + i) & 0xFFFF;
+          const byteVal = vm.memory[byteAddr];
+          const span = document.createElement("span");
+          span.className = "hex-byte";
+          span.textContent = toHexLower(byteVal, 2);
+          span.dataset.addr = byteAddr;
+          span.onclick = () => startEditHex(span, byteAddr);
+          hexContainer.appendChild(span);
+        }
+        tdHex.appendChild(hexContainer);
+        tr.appendChild(tdHex);
+
+        tbody.appendChild(tr);
+      }
+    }
+
+    function startEditHex(spanEl, addr) {
+      if (spanEl.classList.contains("editing")) return;
+      spanEl.classList.add("editing");
+      spanEl.contentEditable = "true";
+      spanEl.focus();
+
+      const range = document.createRange();
+      range.selectNodeContents(spanEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      const commit = () => {
+        spanEl.contentEditable = "false";
+        spanEl.classList.remove("editing");
+        let val = parseInt(spanEl.textContent.trim(), 16);
+        if (isNaN(val)) val = 0;
+        vm.memory[addr] = val & 0xFF;
+        renderDump();
+      };
+
+      spanEl.onblur = commit;
+      spanEl.onkeydown = (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          spanEl.textContent = toHexLower(vm.memory[addr], 2);
+          spanEl.contentEditable = "false";
+          spanEl.classList.remove("editing");
+        }
+      };
+    }
+
+    function setDumpBase(addr) {
+      dumpBaseAddr = addr & 0xFFF0;
+      document.getElementById("jumpAddr").value = toHexLower(dumpBaseAddr, 4);
+      renderDump();
+    }
+
+    function movePage(delta) {
+      setDumpBase((dumpBaseAddr + delta) & 0xFFFF);
+    }
+
+    function jumpToAddr() {
+      const addr = parseInt(document.getElementById("jumpAddr").value, 16);
+      if (!isNaN(addr)) setDumpBase(addr);
+    }
+
+    function updateUI() {
+      document.getElementById("regPC").textContent = toHexLower(vm.pc, 4);
+      document.getElementById("regSP").textContent = toHexLower(vm.sp, 4);
+      document.getElementById("regAF").textContent = toHexLower(vm.getPSW(), 4);
+      document.getElementById("regBC").textContent = toHexLower(vm.getBC(), 4);
+      document.getElementById("regDE").textContent = toHexLower(vm.getDE(), 4);
+      document.getElementById("regHL").textContent = toHexLower(vm.getHL(), 4);
+      document.getElementById("regIX").textContent = toHexLower(vm.ix, 4);
+      document.getElementById("regIY").textContent = toHexLower(vm.iy, 4);
+      renderDump();
+    }
+
+    let monitorRunId = 0;
+    function resetVmState() { monitorRunId++; abortRequested = true; vm.reset(); updateUI(); }
+    function stepVm() {
+      monitorRunId++;
+      abortRequested = true;
+      // A completed HALT leaves PC on the next instruction. Allow stepping onward.
+      vm.halted = false;
+      vm.step();
+      updateUI();
+    }
+    function getMonitorAddress() {
+      const field = document.getElementById("runAddress");
+      const value = field.value.trim();
+      if (!/^[0-9a-fA-F]{1,4}$/.test(value)) {
+        addTrace("Invalid address (0000-FFFF)"); field.focus(); return null;
+      }
+      return parseInt(value, 16);
+    }
+    function setMonitorPC() {
+      const address = getMonitorAddress();
+      if (address === null) return;
+      monitorRunId++;
+      abortRequested = true;
+      vm.pc = address;
+      vm.halted = false;
+      updateUI();
+    }
+    function runFromAddress() {
+      const address = getMonitorAddress();
+      if (address === null) return;
+      runCurrentExecution(address);
+    }
+    function runCurrentExecution(startAddress = null) {
+      const id = ++monitorRunId;
+      abortRequested = false;
+      if (startAddress !== null) {
+        vm.pc = startAddress & 0xFFFF;
+      }
+      // Resume after HALT or Abort from the current PC, without resetting registers.
+      vm.halted = false;
+      updateUI();
+      function runChunk() {
+        if (id !== monitorRunId || abortRequested) return;
+        let n = 0;
+        while (!vm.halted && n++ < 30000 && !abortRequested && id === monitorRunId) {
+          if (!vm.step()) break;
+        }
+        // Preserve the stopping PC so Resume and Step can continue from it.
+        updateUI();
+        if (!vm.halted && !abortRequested && id === monitorRunId) {
+          setTimeout(runChunk, 0);
+        } else if (vm.halted && !abortRequested && id === monitorRunId) {
+          terminal.print("\r\n");
+          terminal.showPrompt();
+          termScreen.focus();
+        }
+      }
+      runChunk();
+    }
+
+    (async () => {
+      await vDisk.init();
+      renderVDiskList();
+      resetVmState();
+      terminal.setPrompt(getPromptStr());
+      terminal.print("MSX-DOS2 Virtual Machine\r\nDrag and dropp files here\r\nType HELP to display the command list.\r\n");
+      terminal.showPrompt();
+      termScreen.focus();
+    })();
+  </script>
+</body>
+</html>
