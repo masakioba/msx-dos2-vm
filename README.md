@@ -20,6 +20,8 @@ It does not use the original MSX-DOS or any MSX ROMs. MSX BIOS is not implemente
 
 本物のMSX-DOSやMSX ROMは使用していません。MSX-BIOSも実装していません。
 
+Unlike a conventional MSX emulator, it does not emulate the entire MSX hardware. It focuses on running DOS programs in a convenient environment.
+
 一般的なMSXエミュレーターとは異なり、MSXのハードウェア全体は再現しません。MSX-DOSプログラムを使いやすい環境で実行することを目的としています。
 
 ## Testing Status / 動作確認状況
