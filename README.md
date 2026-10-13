@@ -6,6 +6,8 @@ A web-based MSX-DOS 2 compatible environment with built-in BDS C and a machine l
 
 BDS Cとマシン語モニタを内蔵した、WebベースのMSX-DOS 2互換環境です。
 
+[![Screenshot](jpeg/msxdos2vm.jpeg)](jpeg/msxdos2vm.jpeg)
+
 ## Overview / 概要
 
 MSX-DOS2 Virtual Machine runs in a web browser using JavaScript. It emulates the Intel 8080, Z80, and R800 instruction sets and provides CP/M and MSX-DOS 1/2 compatible system calls.
