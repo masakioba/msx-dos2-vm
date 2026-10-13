@@ -97,6 +97,12 @@ Click **Load BDS C** to load the BDS C development tools from `bdsc.js`.
 
 **Load BDS C** ボタンを押すと、`bdsc.js` からBDS Cの開発ツールを読み込みます。
 
+## How to Copy Files to the VM / VMにファイルをコピーする方法
+
+Drag and drop files onto the console screen.
+
+プロンプト画面にファイルをドラッグ＆ドロップします。
+
 ## Limitations / 制限事項
 
 This project does not emulate MSX video or sound hardware. Software that directly accesses MSX hardware may not work.
