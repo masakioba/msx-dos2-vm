@@ -57,6 +57,28 @@ Z80/R800拡張命令と、MSX-DOS/MSX-DOS2拡張システムコールの動作�
 - File upload and download  
   ファイルのアップロードとダウンロード
 
+## Shell / シェルについて
+
+The shell supports hierarchical directories and commands such as `cd`, `md`, and `rd`.
+
+シェルは階層ディレクトリに対応し、`cd`、`md`、`rd` などのコマンドが使えます。
+
+Many features, including escape sequences, pipes, and batch files, have not been implemented.
+
+エスケープシーケンス、パイプ、バッチファイルなど、実装していない機能が多くあります。
+
+The goal is not to faithfully reproduce the original MSX-DOS commands.
+
+MSX-DOSのコマンドを忠実に再現することは目的としていません。
+
+I also wanted a UNIX-like environment, so I added `ls` and `cp` as aliases, along with a simple vi-like text editor as a built-in command.
+
+UNIX風にもしたかったので、`ls`、`cp` のエイリアスを入れて、簡易的なviテキストエディタも内部コマンドとして入れました。
+
+I also included `COPY CON <filename>`, which was available in MSX-DOS, although I'm not sure it can really be called an editor.
+
+エディタと呼べるか分かりませんが、MSX-DOSで使えた `COPY CON <filename>` も一応用意しています。
+
 ## Getting Started / 使用方法
 
 Open `msxdos2vm.html` in a web browser.
