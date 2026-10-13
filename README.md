@@ -1,4 +1,4 @@
-# MSX-DOS2 VM and BDS C for Web
+# MSX-DOS2 VM with BDS C for Web
 
 [Open MSX-DOS2 Virtual Machine](https://masakioba.github.io/msx-dos2-vm/msxdos2vm.html)
 
