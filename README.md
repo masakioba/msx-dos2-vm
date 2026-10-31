@@ -2,9 +2,25 @@
 
 [Open MSX-DOS2 Virtual Machine](https://masakioba.github.io/msx-dos2-vm/msxdos2vm.html)
 
+This software will probably never be completed.
+
+このソフトウェアはおそらく永遠に完成しません。
+
 A web-based MSX-DOS 2 compatible environment with built-in BDS C and a machine language monitor.
 
 BDS Cとマシン語モニタを内蔵した、WebベースのMSX-DOS 2互換環境です。
+
+実際には CP/Mや8080に関する部分でさえ完全ではない。
+
+In fact, even the CP/M and 8080 parts are not complete.
+
+| Software | OS | Developer / Version | Status |
+|---|---|---|---|
+| BDS C | CP/M | BD Software | 〇 |
+| M80 / L80 | CP/M | Microsoft | 〇 |
+| ZSM | CP/M | Zilog/Mostek Z80 Assembler Version 3.4 | 〇 |
+| Z80ASM 1.32 | CP/M | SLR Systems | × |
+| MSX-C Ver 1.2 | MSX-DOS 2 | ASCII | × |
 
 [![Screenshot](jpeg/msxdos2vm.jpeg)](jpeg/msxdos2vm.jpeg)
 
