@@ -56,7 +56,7 @@
     .vdisk-item { display: flex; justify-content: space-between; align-items: center; color: #ccc; }
     .log-container {
       background: #000; border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px;
-      font-size: 0.72rem; color: #aaa; height: 35px; overflow-y: auto; white-space: pre-wrap;
+      font-size: 0.72rem; color: #aaa; height: 110px; overflow-y: auto; white-space: pre-wrap;
     }
 
     /* Memory Monitor Styles */
@@ -136,7 +136,10 @@
         <div class="reg-box"><span class="reg-label">IY</span><span id="regIY" class="reg-val">0000</span></div>
       </div>
 
-      <div style="font-size: 0.72rem; color: #888; font-weight: bold;">TRACE / LOG</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+        <span style="font-size:0.72rem;color:#888;font-weight:bold;">TRACE / LOG</span>
+        <button class="secondary small" type="button" onclick="copyTraceLog()">Copy Log</button>
+      </div>
       <div class="log-container" id="traceLog">Ready.</div>
 
       <div style="font-size: 0.72rem; color: #888; font-weight: bold; display: flex; justify-content: space-between;">
@@ -190,7 +193,7 @@
       <textarea id="viText" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" ></textarea>
       <div id="viStatus">NORMAL</div>
       <input id="viCommand" autocomplete="off" spellcheck="false" aria-label="vi command">
-      <div id="viHint">i/I/o/O: insert  |  Esc: normal  |  h j k l: move  |  x dd yy p P  |  /: search  |  :w :q :wq :q!</div>
+      <div id="viHint">i/I/o/O: insert  |  Esc: normal  |  h j k l: move  |  x dd yy p P  |  /: search  |  :w :q :wq :wq! :q!</div>
     </div>
   </div>
   <script src="bdsc.js"></script>
@@ -435,7 +438,8 @@
                   dir: dir,
                   displayName: fileName,
                   data: rec.data,
-                  isDir: isDir
+                  isDir: isDir,
+                  modifiedAt: Number.isFinite(rec.modifiedAt) ? rec.modifiedAt : null
                 });
               }
               resolve();
@@ -474,18 +478,19 @@
           dir: parentDir,
           displayName: dirName,
           data: new Uint8Array(0),
-          isDir: true
+          isDir: true,
+          modifiedAt: Date.now()
         };
         this.files.set(norm, record);
         if (this.db) {
           try {
             const tx = this.db.transaction("files", "readwrite");
-            tx.objectStore("files").put({ name: norm, data: record.data, isDir: true });
+            tx.objectStore("files").put({ name: norm, data: record.data, isDir: true, modifiedAt: record.modifiedAt });
           } catch (e) {}
         }
       }
 
-      async putFileInDir(dir, rawName, data) {
+      async putFileInDir(dir, rawName, data, modifiedAt = Date.now()) {
         const normDir = this.resolvePath("/", dir);
         const fileName = rawName.toUpperCase().trim();
         const fullPath = (normDir === "/" ? "/" : normDir + "/") + fileName;
@@ -511,13 +516,14 @@
           dir: normDir,
           displayName: fileName,
           data: bytes,
-          isDir: false
+          isDir: false,
+          modifiedAt: Number.isFinite(modifiedAt) && modifiedAt >= 0 ? modifiedAt : Date.now()
         };
         this.files.set(fullPath, record);
         if (this.db) {
           try {
             const tx = this.db.transaction("files", "readwrite");
-            tx.objectStore("files").put({ name: fullPath, data: bytes, isDir: false });
+            tx.objectStore("files").put({ name: fullPath, data: bytes, isDir: false, modifiedAt: record.modifiedAt });
           } catch (e) {}
         }
       }
@@ -628,6 +634,15 @@
     class MSXDOS_R800 {
       constructor(terminal, disk, onTrace) {
         this.memory = new Uint8Array(65536);
+        // Four 16KB CPU pages backed by sixteen 16KB RAM mapper segments (256KB).
+        this.mapperRAM = new Uint8Array(256 * 1024);
+        this.mapperPages = new Uint8Array([0, 1, 2, 3]);
+        this.primarySlots = 0xFF; // Four pages start in mapper RAM, primary slot 3.
+        this.secondarySlots = 0; // Expanded slot 3, subslot 0 by default.
+        this.slotBanks = Array.from({length: 3},()=>Array.from({length: 4},()=>new Uint8Array(0x4000)));
+        this.mapperAllocated = new Uint8Array(16);
+        this.slotCallFrames = [];
+        this.mapperTable = 0xFBC0; this.mapperJumps = 0xFBE0;
         this.term = terminal;
         this.disk = disk;
         this.onTrace = onTrace;
@@ -640,12 +655,12 @@
         this.dosVerify = false;
         this.dosSearch = [];
         this.dosDrive = 0;
-        this.dos2Handles = new Map(); this.dos2LastError = 0; this.dos2Environment=new Map(); this.dos2Searches=new Map(); this.dos2FibPaths=new Map(); this.dos2DiskCheck=0; this.dos2Redirection=0;
+        this.dos2Handles = new Map(); this.dos2DeviceModes = new Map(); this.dos2LastError = 0; this.dos2Environment=new Map(); this.dos2Searches=new Map(); this.dos2FibPaths=new Map(); this.dos2DiskCheck=0; this.dos2Redirection=0; this.dos2WholePath=null;
 
         this.a = 0; this.b = 0; this.c = 0; this.d = 0; this.e = 0; this.h = 0; this.l = 0;
         this.ix = 0; this.iy = 0;
         this.sp = 0xF000; this.pc = 0x0100;
-        this.flags = { s: 0, z: 0, ac: 0, p: 0, cy: 0, n: 0 };
+        this.flags = { s: 0, z: 0, ac: 0, p: 0, cy: 0, n: 0, f3: 0, f5: 0 };
 
         this.parityTable = new Uint8Array(256);
         for (let i = 0; i < 256; i++) {
@@ -655,19 +670,39 @@
         }
 
         this.halted = false;
+        this.diagnosticCounts = new Map();
+        this.diagnosticLastPC = null;
+        this.bdosCallPC = 0;
+        this.bdosTraceCount = 0;
+        this.cfOpenTraceRemaining = 0; this.cfIoctlTraceStarted = false; this.cfTcoHistory = []; this.cfTcoHandle = null;
+        this.hardwareTraceCount = 0; this.hardwareTraceLimit = 300; this.hardwareTraceEvents = [];
+        this.z80asmProbe = false;
+        this.z80asmHistory = [];
+        this.z80asmAfterRead = 0;
+        this.z80asmReadCount = 0;
+        this.z80asmExitPathLogged = false;
+        this.z80asmBitCheckLog = [];
         this.reset();
       }
 
       reset() {
         this.memory.fill(0);
+        this.mapperRAM.fill(0);
+        this.mapperPages.set([0, 1, 2, 3]);
+        this.primarySlots = 0xFF; this.secondarySlots = 0;
+        for (const slot of this.slotBanks) for (const bank of slot) bank.fill(0);
+        this.mapperAllocated.fill(0); this.mapperAllocated.set([1, 1, 1, 1]);
+        this.slotCallFrames = [];
+        this.mapperCallFrames = [];
         this.a = 0; this.b = 0; this.c = 0; this.d = 0; this.e = 0; this.h = 0; this.l = 0;
         this.ix = 0; this.iy = 0;
-        this.flags = { s: 0, z: 0, ac: 0, p: 0, cy: 0, n: 0 };
+        this.flags = { s: 0, z: 0, ac: 0, p: 0, cy: 0, n: 0, f3: 0, f5: 0 };
         this.altA=0;this.altF=0x02;this.altBC=0;this.altDE=0;this.altHL=0;
         this.i=0;this.r=0;this.im=0;this.iff1=false;this.iff2=false;
         this.pc = 0x0100; this.dta = 0x0080;
-        this.halted = false; this.totalCycles = 0;
-        this.dos2Handles.clear(); this.dos2LastError=0; this.dos2Searches.clear(); this.dos2FibPaths.clear();
+        this.halted = false; this.totalCycles = 0; this.hardwareTraceCount = 0; this.hardwareTraceEvents = [];
+        this.diagnosticCounts.clear(); this.diagnosticLastPC = null; this.bdosCallPC = 0; this.cfOpenTraceRemaining = 0; this.cfIoctlTraceStarted = false; this.cfTcoHistory = []; this.cfTcoHandle = null;
+        this.dos2Handles.clear(); this.dos2DeviceModes.clear(); this.dos2LastError=0; this.dos2Searches.clear(); this.dos2FibPaths.clear(); this.dos2WholePath=null;
         this.openWriteBuffers.clear(); this.dosSearch=[]; this.dosWaiting=null; this.dosResumeLine=false; this.dosInput=[];
 
         this.memory[0x0000] = 0x00; // CP/M warm-boot entry; handled as DOS return in step()
@@ -678,10 +713,162 @@
         this.memory[0xF000] = 0xD7; // RST 2 (BDOS Hook)
         this.memory[0xF001] = 0xC9; // RET
 
+        // Expose the DOS2 mapper extension in page 3.
+        this.memory[0xFB20] |= 1; // HOKVLD bit 0: extended BIOS installed.
+        this.memory[0xFFCA] = 0xC9; // EXTBIO entry; handled in step().
+        this.memory[this.mapperTable] = 0x03; // Primary mapper slot ID.
+        this.memory[this.mapperTable+1] = 16;
+        this.memory[this.mapperTable+2] = 12;
+        this.memory[this.mapperTable+3] = 4;
+        this.memory[this.mapperTable+4] = 0;
+        this.memory[this.mapperTable+8] = 0;
+        for (let i=0;i<16;i++) {
+          const a=this.mapperJumps+i*3;
+          this.memory[a]=0xC9; // RET placeholder, dispatch is handled in step().
+          this.memory[a+1]=0; this.memory[a+2]=0;
+        }
         this.sp = 0xF000;
         this.push16(0x0000);
+        // Mirror the initial CPU address space into its four mapper segments.
+        for (let page = 0; page < 4; page++) {
+          const offset = page * 0x4000;
+          this.mapperRAM.set(this.memory.subarray(offset, offset + 0x4000), offset);
+        }
       }
 
+      mappedSlot(page) { return (this.primarySlots >>> (2*(page&3))) & 3; }
+      saveMappedPage(page) {
+        const offset=page*0x4000, slot=this.mappedSlot(page);
+        const backing=slot===3?this.mapperRAM.subarray(this.mapperPages[page]*0x4000,(this.mapperPages[page]+1)*0x4000):this.slotBanks[slot][page];
+        backing.set(this.memory.subarray(offset,offset+0x4000));
+      }
+      restoreMappedPage(page) {
+        const offset=page*0x4000, slot=this.mappedSlot(page);
+        const backing=slot===3?this.mapperRAM.subarray(this.mapperPages[page]*0x4000,(this.mapperPages[page]+1)*0x4000):this.slotBanks[slot][page];
+        this.memory.set(backing,offset);
+      }
+      setPrimarySlots(value) {
+        value&=255;
+        if(value===this.primarySlots)return;
+        const old=this.primarySlots;
+        for(let page=0;page<4;page++)if(((old>>>(2*page))&3)!==((value>>>(2*page))&3))this.saveMappedPage(page);
+        this.primarySlots=value;
+        for(let page=0;page<4;page++)if(((old>>>(2*page))&3)!==((value>>>(2*page))&3))this.restoreMappedPage(page);
+      }
+      setMapperPage(page, segment) {
+        page&=3;segment&=15;
+        if(this.mapperPages[page]===segment)return;
+        if(this.mappedSlot(page)===3)this.saveMappedPage(page);
+        this.mapperPages[page]=segment;
+        if(this.mappedSlot(page)===3)this.restoreMappedPage(page);
+      }
+      readSlotByte(slotId, address) {
+        const page=(address>>>14)&3,slot=slotId&3;
+        if(slot===this.mappedSlot(page))return this.memory[address&65535];
+        const index=address&0x3FFF;
+        return slot===3?this.mapperRAM[(this.mapperPages[page]<<14)|index]:this.slotBanks[slot][page][index];
+      }
+      writeSlotByte(slotId,address,value) {
+        const page=(address>>>14)&3,slot=slotId&3,index=address&0x3FFF;
+        if(slot===3)this.mapperRAM[(this.mapperPages[page]<<14)|index]=value&255;
+        else this.slotBanks[slot][page][index]=value&255;
+        if(slot===this.mappedSlot(page))this.memory[address&65535]=value&255;
+      }
+      refreshMapperTable() {
+        const free=16-this.mapperAllocated.reduce((a,b)=>a+b,0);
+        this.memory[this.mapperTable+2]=free;
+        this.memory[this.mapperTable+3]=4;
+        this.memory[this.mapperTable+4]=12-free;
+      }
+      handleExtendedBIOS() {
+        if(this.d===4 && (this.e===1||this.e===2)) {
+          this.refreshMapperTable();
+          if(this.e===1){this.a=3;this.setHL(this.mapperTable);}
+          else {this.a=16;this.b=3;this.c=this.memory[this.mapperTable+2];this.setHL(this.mapperJumps);}
+          this.traceHardware('EXTBIO-CALL',`FUNCTION=${this.e} RESULT=${this.diagHex(this.getHL())} A=${this.diagHex(this.a,2)}`);
+        }
+        this.pc=this.pop16();
+      }
+      handleMapperSupport(index) {
+        const page=(index===6||index===7)?((this.h>>>6)&3):index>=8?((index-8)>>1):0;
+        const isGet=index===7 || (index>=8 && (index&1));
+        if(index===0) { // ALL_SEG
+          let segment=-1;
+          for(let i=0;i<16;i++)if(!this.mapperAllocated[i]){segment=i;break;}
+          if(segment<0)this.flags.cy=1;
+          else {this.mapperAllocated[segment]=this.a===1?2:1;this.a=segment;this.flags.cy=0;this.refreshMapperTable();}
+          this.b=0;
+        } else if(index===1) { // FRE_SEG
+          const segment=this.a&15;
+          this.flags.cy=this.a>=16 || !this.mapperAllocated[segment] || segment<4?1:0;
+          if(!this.flags.cy){this.mapperAllocated[segment]=0;this.refreshMapperTable();}
+        } else if(index===2) { // RD_SEG
+          this.a=this.mapperRAM[((this.a&15)<<14)|(this.getHL()&0x3FFF)];
+        } else if(index===3) { // WR_SEG
+          const segment=this.a&15,offset=this.getHL()&0x3FFF;
+          this.mapperRAM[(segment<<14)|offset]=this.e;
+          for(let p=0;p<4;p++)if(this.mappedSlot(p)===3 && this.mapperPages[p]===segment)this.memory[p*0x4000+offset]=this.e;
+        } else if(index===4 || index===5) { // CAL_SEG / CALLS
+          // CALLS arguments immediately follow CALL CALLS in the caller's code.
+          const stackReturn=this.memory[this.sp]|(this.memory[(this.sp+1)&0xFFFF]<<8);
+          const target=index===4 ? this.ix :
+            (this.memory[(stackReturn+1)&0xFFFF]|(this.memory[(stackReturn+2)&0xFFFF]<<8));
+          const segment=index===4 ? ((this.iy>>>8)&255) : this.memory[stackReturn];
+          const returnPC=index===4 ? stackReturn : (stackReturn+3)&0xFFFF;
+          const page=(target>>>14)&3;
+          if(index===5) {
+            // Skip the three inline parameter bytes when the callee returns.
+            this.memory[this.sp]=returnPC&255;
+            this.memory[(this.sp+1)&0xFFFF]=returnPC>>>8;
+          }
+          if(page!==3 && this.mappedSlot(page)===3) {
+            const previous=this.mapperPages[page];
+            this.setMapperPage(page,segment);
+            this.mapperCallFrames.push({ret:returnPC,sp:(this.sp+2)&0xFFFF,page,segment:previous});
+          }
+          this.traceHardware('MAPPER-CALL',`ROUTINE=${index===4?'CAL_SEG':'CALLS'} SEG=${this.diagHex(segment,2)} TARGET=${this.diagHex(target)} RETURN=${this.diagHex(returnPC)} PAGE=${page}`);
+          this.pc=target;
+          return;
+        } else if(index===6 || index>=8) {
+          if(isGet)this.a=this.mapperPages[page];
+          else if(page!==3)this.setMapperPage(page,this.a);
+        }
+        this.traceHardware('MAPPER-BIOS',`INDEX=${index} A=${this.diagHex(this.a,2)} SLOT=03 PAGES=${Array.from(this.mapperPages).join(',')}`);
+        this.pc=this.pop16();
+      }
+      handleSlotBIOS() {
+        const entry=this.pc;
+        if(entry===0x000C)this.a=this.readSlotByte(this.a,this.getHL());
+        else if(entry===0x0014)this.writeSlotByte(this.a,this.getHL(),this.e);
+        else if(entry===0x0024){const page=(this.getHL()>>>14)&3;this.setPrimarySlots((this.primarySlots&~(3<<(2*page)))|((this.a&3)<<(2*page)));}
+        else if(entry===0x001C || entry===0x0030) {
+          let target=this.ix,slot=(this.iy>>>8)&255;
+          if(entry===0x0030){const ptr=this.sp;slot=this.memory[(ptr+2)&65535];target=this.memory[(ptr+3)&65535]|(this.memory[(ptr+4)&65535]<<8);}
+          const page=(target>>>14)&3;
+          this.slotCallFrames.push({ret:this.memory[this.sp]|(this.memory[(this.sp+1)&65535]<<8),sp:(this.sp+2)&65535,slots:this.primarySlots});
+          this.setPrimarySlots((this.primarySlots&~(3<<(2*page)))|((slot&3)<<(2*page)));
+          this.pc=target;
+          return;
+        }
+        this.traceHardware('SLOT-BIOS',`ENTRY=${this.diagHex(entry)} SLOT=${this.diagHex(this.primarySlots,2)}`);
+        this.pc=this.pop16();
+      }
+      diagHex(value, digits=4) { return (value >>> 0).toString(16).toUpperCase().padStart(digits,'0'); }
+      diagnostic(kind, detail, pc=this.pc) {
+        // Rate-limit by type, details and call site; never change emulated execution.
+        const key=kind+'|'+detail+'|'+(pc&0xFFFF);
+        const n=(this.diagnosticCounts.get(key)||0)+1;
+        this.diagnosticCounts.set(key,n);
+        if(n===1 || n===10 || n===100 || n===1000) {
+          this.onTrace(`[DIAG ${kind}] PC=${this.diagHex(pc)} ${detail}${n>1?' (x'+n+')':''}`);
+        }
+      }
+      diagnosticMemory(kind, addr) {
+        // This only observes selected CPU access helpers, not every direct memory[] access.
+        addr&=0xFFFF;
+        if(addr<0x0100 || addr>=0xF000)
+          this.diagnostic('MEM-'+kind, 'ADDR='+this.diagHex(addr), this.diagnosticLastPC??this.pc);
+      }
       getBC() { return (this.b << 8) | this.c; }
       setBC(v) { this.b = (v >> 8) & 0xFF; this.c = v & 0xFF; }
       getDE() { return (this.d << 8) | this.e; }
@@ -708,7 +895,9 @@
         let psw = this.flags.n ? 0x02 : 0x00;
         if (this.flags.s)  psw |= 0x80;
         if (this.flags.z)  psw |= 0x40;
+        if (this.flags.f5) psw |= 0x20;
         if (this.flags.ac) psw |= 0x10;
+        if (this.flags.f3) psw |= 0x08;
         if (this.flags.p)  psw |= 0x04;
         if (this.flags.cy) psw |= 0x01;
         return (this.a << 8) | psw;
@@ -719,7 +908,9 @@
         const psw = val & 0xFF;
         this.flags.s  = (psw & 0x80) ? 1 : 0;
         this.flags.z  = (psw & 0x40) ? 1 : 0;
+        this.flags.f5 = (psw & 0x20) ? 1 : 0;
         this.flags.ac = (psw & 0x10) ? 1 : 0;
+        this.flags.f3 = (psw & 0x08) ? 1 : 0;
         this.flags.p  = (psw & 0x04) ? 1 : 0;
         this.flags.cy = (psw & 0x01) ? 1 : 0;
         this.flags.n = (psw & 0x02) ? 1 : 0;
@@ -730,7 +921,7 @@
           case 0: return this.b; case 1: return this.c;
           case 2: return this.d; case 3: return this.e;
           case 4: return this.h; case 5: return this.l;
-          case 6: return this.memory[this.getHL()]; case 7: return this.a;
+          case 6: this.diagnosticMemory("READ",this.getHL());return this.memory[this.getHL()]; case 7: return this.a;
         }
       }
 
@@ -740,7 +931,7 @@
           case 0: this.b = val; break; case 1: this.c = val; break;
           case 2: this.d = val; break; case 3: this.e = val; break;
           case 4: this.h = val; break; case 5: this.l = val; break;
-          case 6: this.memory[this.getHL()] = val; break; case 7: this.a = val; break;
+          case 6: this.diagnosticMemory("WRITE",this.getHL());this.memory[this.getHL()] = val; break; case 7: this.a = val; break;
         }
       }
 
@@ -759,7 +950,10 @@
         }
       }
 
+      zSet35(v) { this.flags.f3=(v>>3)&1; this.flags.f5=(v>>5)&1; }
+
       setSZP(res) {
+        this.zSet35(res & 255);
         this.flags.z = ((res & 0xFF) === 0) ? 1 : 0;
         this.flags.s = (res & 0x80) ? 1 : 0;
         this.flags.p = this.parityTable[res & 0xFF];
@@ -804,6 +998,7 @@
         this.flags.ac = ((this.a & 0x0F) < (val & 0x0F)) ? 1 : 0;
         this.flags.n = 1;
         this.setSZP(res & 0xFF);
+        this.zSet35(val & 255);
         this.flags.p = (((this.a ^ val) & (this.a ^ res) & 0x80) !== 0) ? 1 : 0;
       }
 
@@ -825,9 +1020,9 @@
       zFetch() { const v=this.memory[this.pc];this.pc=(this.pc+1)&65535;return v; }
       zWord() { const l=this.zFetch();return l|(this.zFetch()<<8); }
       zSigned(v) { return v&128?v-256:v; }
-      zRead16(a) { return this.memory[a&65535]|(this.memory[(a+1)&65535]<<8); }
-      zWrite16(a,v) { this.memory[a&65535]=v&255;this.memory[(a+1)&65535]=(v>>8)&255; }
-      zSetSZ(v) { this.flags.s=(v>>7)&1;this.flags.z=(v&255)===0?1:0; }
+      zRead16(a) { this.diagnosticMemory("READ",a);this.diagnosticMemory("READ",a+1);return this.memory[a&65535]|(this.memory[(a+1)&65535]<<8); }
+      zWrite16(a,v) { this.diagnosticMemory("WRITE",a);this.diagnosticMemory("WRITE",a+1);this.memory[a&65535]=v&255;this.memory[(a+1)&65535]=(v>>8)&255; }
+      zSetSZ(v) { this.flags.s=(v>>7)&1;this.flags.z=(v&255)===0?1:0;this.zSet35(v&255); }
       zSetOverflowAdd(a,b,c,res) { this.flags.p=((~(a^b)&(a^res)&128)!==0)?1:0; }
       zSetOverflowSub(a,b,c,res) { this.flags.p=(((a^b)&(a^res)&128)!==0)?1:0; }
       zAdd16(a,b,carry=0,subtract=false) {
@@ -837,6 +1032,7 @@
         this.flags.n=subtract?1:0;
         this.flags.s=(r>>15)&1;this.flags.z=r===0?1:0;
         this.flags.p=subtract?(((a^b)&(a^r)&32768)?1:0):((~(a^b)&(a^r)&32768)?1:0);
+        this.zSet35((r>>8)&255);
         return r;
       }
       zRotateShift(v,kind) {
@@ -866,6 +1062,7 @@
           this.flags.z=bit?0:1;this.flags.p=this.flags.z;
           this.flags.ac=1;this.flags.n=0;
           this.flags.s=(y===7&&bit)?1:0;
+          this.zSet35(addr===null?v:(addr>>8));
         } else {
           const r=x===2?(v&~(1<<y)):(v|(1<<y));
           if(addr!==null){this.memory[addr]=r;if(z!==6)this.setReg(z,r);}
@@ -912,26 +1109,65 @@
             this.memory[this.getDE()]=this.memory[this.getHL()];this.setDE((this.getDE()+dir)&65535);
             this.setHL((this.getHL()+dir)&65535);this.setBC((this.getBC()-1)&65535);
             this.flags.ac=0;this.flags.n=0;this.flags.p=this.getBC()?1:0;
+            const sum=(this.a+this.memory[(this.getHL()-dir)&65535])&255;
+            this.flags.f3=(sum>>3)&1;this.flags.f5=(sum>>1)&1;
             if(repeat&&this.getBC())this.pc=(this.pc-2)&65535;
           } else if(group===1){ // CPI/CPD/CPIR/CPDR
             const a=this.a,b=this.memory[this.getHL()],v=(a-b)&255,cy=this.flags.cy;
             this.setHL((this.getHL()+dir)&65535);this.setBC((this.getBC()-1)&65535);
             this.zSetSZ(v);this.flags.ac=((a&15)<(b&15))?1:0;
             this.flags.n=1;this.flags.p=this.getBC()?1:0;this.flags.cy=cy;
+            const adj=(v-this.flags.ac)&255;this.flags.f3=(adj>>3)&1;this.flags.f5=(adj>>1)&1;
             if(repeat&&this.getBC()&&!this.flags.z)this.pc=(this.pc-2)&65535;
           } else { // INI/IND/INIR/INDR and OUTI/OUTD/OTIR/OTDR
-            if(group===2)this.memory[this.getHL()]=this.zPortIn(this.getBC());
-            else this.zPortOut(this.getBC(),this.memory[this.getHL()]);
-            this.setHL((this.getHL()+dir)&65535);this.b=(this.b-1)&255;
-            this.flags.z=this.b===0?1:0;this.flags.n=1;
+            const oldHL=this.getHL();
+            const oldBC=this.getBC();
+            // Z80 block I/O uses BC after B decrement for input, before for output.
+            this.b=(this.b-1)&255;
+            const value=group===2?this.zPortIn(this.getBC()):this.memory[oldHL];
+            if(group===2)this.memory[oldHL]=value;
+            else this.zPortOut(oldBC,value);
+            this.setHL((oldHL+dir)&65535);
+            // Undocumented Z80 flags: S/Z/F5/F3 from B', N from data bit 7,
+            // H/C from the nine-bit sum, PV from parity((sum & 7) ^ B').
+            const k=value+(group===2?((this.c+dir)&255):(this.l&255));
+            this.flags.s=(this.b>>7)&1;
+            this.flags.z=this.b===0?1:0;
+            this.flags.f5=(this.b>>5)&1;
+            this.flags.f3=(this.b>>3)&1;
+            this.flags.ac=k>255?1:0;
+            this.flags.cy=this.flags.ac;
+            this.flags.p=this.parityTable[((k&7)^this.b)&255];
+            this.flags.n=(value>>7)&1;
             if(repeat&&this.b)this.pc=(this.pc-2)&65535;
           }
           return;
         }
-        // All unused ED opcodes act as NOP on Z80.
+        // All unused ED opcodes act as NOP on Z80. Log for compatibility diagnosis.
+        this.diagnostic("ED-NOP", "ED "+this.diagHex(op,2), (this.pc-2)&65535);
       }
-      zPortIn(port){return this.portIn?this.portIn(port)&255:255;}
-      zPortOut(port,v){if(this.portOut)this.portOut(port,v&255);}
+      traceHardware(kind, detail, pc=this.diagnosticLastPC??this.pc) {
+        if (this.hardwareTraceCount < this.hardwareTraceLimit) {
+          const event = `[HW-${kind}] PC=${this.diagHex(pc)} ${detail}`;
+          this.hardwareTraceEvents.push(event);
+          this.onTrace(event);
+          this.hardwareTraceCount++;
+          if (this.hardwareTraceCount === this.hardwareTraceLimit) this.onTrace('[HW-TRACE] Limit reached (300 events)');
+        }
+      }
+      zPortIn(port){
+        const low=port&255;
+        const v=low>=0xFC?this.mapperPages[low-0xFC]:low===0xA8?this.primarySlots:(this.portIn?this.portIn(port)&255:255);
+        if (low>=0xFC || low===0xA8) this.traceHardware('PORT-IN', `PORT=${this.diagHex(port)} VALUE=${this.diagHex(v,2)} ${low>=0xFC?'MAPPER':'PRIMARY-SLOT'}`);
+        return v;
+      }
+      zPortOut(port,v){
+        const low=port&255;
+        if (low>=0xFC || low===0xA8) this.traceHardware('PORT-OUT', `PORT=${this.diagHex(port)} VALUE=${this.diagHex(v,2)} ${low>=0xFC?'MAPPER':'PRIMARY-SLOT'}`);
+        if (low>=0xFC) this.setMapperPage(low-0xFC,v);
+        if (low===0xA8) this.setPrimarySlots(v);
+        if(this.portOut)this.portOut(port,v&255);
+      }
       zIndex(which){return which===0xDD?this.ix:this.iy;}
       zSetIndex(which,v){if(which===0xDD)this.ix=v&65535;else this.iy=v&65535;}
       zIndexed(which){ // DD / FD, including undocumented IXH,IXL,IYH,IYL
@@ -948,7 +1184,7 @@
         if(op===0x2A){this.zSetIndex(which,this.zRead16(this.zWord()));return;}
         if(op===0x23||op===0x2B){this.zSetIndex(which,(ix+(op===0x23?1:-1))&65535);return;}
         if((op&0xCF)===0x09){const p=(op>>4)&3,v=p===2?ix:this.getRP(p),sum=ix+v;
-          this.flags.cy=sum>65535?1:0;this.flags.ac=(((ix&4095)+(v&4095))>4095)?1:0;this.flags.n=0;
+          this.flags.cy=sum>65535?1:0;this.flags.ac=(((ix&4095)+(v&4095))>4095)?1:0;this.flags.n=0;this.zSet35((sum>>8)&255);
           this.zSetIndex(which,sum);return;}
         if(op===0xE1){this.zSetIndex(which,this.pop16());return;}
         if(op===0xE5){this.push16(ix);return;}
@@ -957,10 +1193,10 @@
         if(op===0xF9){this.sp=ix;return;}
         if((op&0xC7)===0x04){const r=(op>>3)&7;if(r>=4&&r<=6){const old=get(r),v=(old+1)&255;
           this.flags.ac=(old&15)===15?1:0;this.flags.n=0;this.zSetSZ(v);
-          this.flags.p=old===127?1:0;put(r,v);return;}}
+          this.flags.p=old===127?1:0;this.zSet35(v);put(r,v);return;}}
         if((op&0xC7)===0x05){const r=(op>>3)&7;if(r>=4&&r<=6){const old=get(r),v=(old-1)&255;
           this.flags.ac=(old&15)===0?1:0;this.flags.n=1;this.zSetSZ(v);
-          this.flags.p=old===128?1:0;put(r,v);return;}}
+          this.flags.p=old===128?1:0;this.zSet35(v);put(r,v);return;}}
         if((op&0xC7)===0x06){const r=(op>>3)&7;if(r>=4&&r<=6){if(r===6)addr();put(r,this.zFetch());return;}}
         if(op>=0x40&&op<=0x7F&&op!==0x76){const y=(op>>3)&7,z=op&7;
           if(y>=4&&y<=6||z>=4&&z<=6){
@@ -1035,6 +1271,9 @@
       dosOpen(fcb, file, create=false) {
         if(!file) {this.a=255;this.l=this.a;return;}
         let obj={name:file.name,path:file.fullPath||this.disk.resolvePath(currentDir,file.name),data:create?new Uint8Array(0):file.data,dirty:!!create};
+        // Keep previously written data visible when the same FCB is reopened.
+        const previous = this.openWriteBuffers.get(fcb);
+        if (previous && previous.dirty) this.dosSave(fcb);
         this.openWriteBuffers.set(fcb,obj);
         this.dosPut16(fcb+14,128);
         this.dosPut32(fcb+16,obj.data.length);
@@ -1042,13 +1281,19 @@
         this.dosPut8(fcb+15, Math.min(128,Math.max(0,Math.ceil(obj.data.length/128)-(this.dosGet8(fcb+12)*128))));
         this.a=0;this.l=0;
       }
+      dosSyncFile(file) {
+        // In-memory visibility must not depend on asynchronous IndexedDB writes.
+        const existing=this.disk.getEntry(file.path);
+        if(existing && !existing.isDir) existing.data=file.data;
+      }
       dosSave(fcb) {
         const file=this.openWriteBuffers.get(fcb);
         if(!file || !file.dirty) return;
-        file.dirty=false;
+        this.dosSyncFile(file);
         const path=file.path;
         const parts=path.split('/').filter(Boolean), name=parts.pop(), dir='/'+parts.join('/');
         this.disk.putFileInDir(dir,name,file.data).then(()=>renderVDiskList());
+        file.dirty=false;
       }
       dosResize(file, length) {
         if(length>16*1024*1024 || length<0) return false; // bounded in-memory virtual disk
@@ -1065,7 +1310,10 @@
       dosWrite(file,position,length,source) {
         if(!file || !this.dosResize(file,Math.max(file.data.length,position+length))) return false;
         for(let i=0;i<length;i++) file.data[position+i]=this.dosGet8(source+i);
-        file.dirty=true;return true;
+        file.dirty=true;
+        this.dosSyncFile(file);
+        this.onTrace(`[FCB-WRITE] FILE=${file.path} POS=${position} SIZE=${length} LENGTH=${file.data.length}`);
+        return true;
       }
       dosSeqRecord(fcb) {return (this.dosGet8(fcb+12)+(this.dosGet8(fcb+14-1)<<8))*128+this.dosGet8(fcb+32);}
       dosSetSeq(fcb,n) {
@@ -1128,8 +1376,14 @@
           case 0x0C: this.b=0;this.h=0;result(0x22);return true;
           case 0x0D: this.dta=0x80;for(const addr of this.openWriteBuffers.keys())this.dosSave(addr);return true;
           case 0x0E: this.dosDrive=0;this.dosPut8(4,0);result(this.e===0?1:0);return true;
-          case 0x0F: file=this.dosMatches(this.dosFcbKey(f))[0];this.dosOpen(f,file);return true;
-          case 0x10: file=this.dosFile(f);if(!file){result(255);return true;}this.dosSave(f);result(0);return true;
+          case 0x0F: {
+            const key=this.dosFcbKey(f);
+            file=this.dosMatches(key)[0];
+            this.onTrace(`[FILE-OPEN DOS1] FCB=${this.diagHex(f)} DRIVE=${this.diagHex(this.dosGet8(f),2)} NAME="${this.dosFcbName(key)}" DIR=${currentDir} FOUND=${file?file.fullPath:'NONE'}`);
+            this.dosOpen(f,file);
+            return true;
+          }
+          case 0x10: file=this.dosFile(f);if(!file){result(255);return true;}this.dosSave(f);this.openWriteBuffers.delete(f);result(0);return true;
           case 0x11: this.dosSearch=this.dosMatches(this.dosFcbKey(f));this.dosSearchNext();return true;
           case 0x12: this.dosSearchNext();return true;
           case 0x13: {
@@ -1142,12 +1396,30 @@
             rec=(fn===0x14||fn===0x15)?this.dosSeqRecord(f):this.dosRecord(f);
             if(fn===0x14||fn===0x21) {
               n=this.dosRead(file,rec*128,128,this.dta);
-              // CP/M text compatibility: mark the first byte after a short
-              // final sequential record as EOF, without modifying the file.
-              if(fn===0x14 && n>0 && n<128 && !file.data.includes(0x1A)) {
-                this.dosPut8(this.dta+n,0x1A);
+              // CP/M FCB reads always return a complete 128-byte record.
+              // Pad a short final record with Ctrl-Z; do not add a record at exact EOF.
+              if(n>0 && n<128) {
+                for(let i=n;i<128;i++) this.dosPut8(this.dta+i,0x1A);
+              }
+              // Diagnose the exact 128-byte record supplied to the application.
+              // Keep this read-only: no changes to DMA, FCB, EOF or return codes.
+              if(fn===0x14 && (n===0 || rec*128+128>=file.data.length-256)) {
+                const hex=[];
+                const ascii=[];
+                let ctrlZ=0;
+                for(let i=0;i<128;i++) {
+                  const v=this.dosGet8(this.dta+i);
+                  hex.push(v.toString(16).toUpperCase().padStart(2,'0'));
+                  ascii.push(v>=32&&v<=126?String.fromCharCode(v):v===13?'\\r':v===10?'\\n':v===26?'\\x1A':'.');
+                  if(v===26)ctrlZ++;
+                }
+                this.onTrace(`[FCB-READ] FILE=${file.path} FCB=${f.toString(16).toUpperCase().padStart(4,'0')} REC=${rec} OFFSET=${rec*128} LENGTH=${file.data.length} COPIED=${n} DMA=${this.dta.toString(16).toUpperCase().padStart(4,'0')} CTRLZ=${ctrlZ} STATUS=${n?0:1}`);
+                for(let i=0;i<128;i+=16) this.onTrace(`[FCB-READ-DATA] +${i.toString(16).toUpperCase().padStart(2,'0')} ${hex.slice(i,i+16).join(' ')} | ${ascii.slice(i,i+16).join('')}`);
               }
               result(n?0:1);
+              // CP/M-compatible BDOS calls return B=H as well as A=L.
+              // Do not change Carry: it is not the specified read status.
+              this.b=this.h;
             } else {
               ok=this.dosWrite(file,rec*128,128,this.dta);
               result(ok?0:1);
@@ -1162,6 +1434,9 @@
             if(key.includes('?')||!name||name.includes('/')||this.dosGet8(f)>1) {result(255);return true;}
             const existing=this.dosFind(key);
             if(existing && this.dosGet8(f+12)!==0){this.dosOpen(f,existing);return true;}
+            // Make the new file visible to subsequent FCB OPEN calls immediately.
+            // putFileInDir updates the in-memory disk before its asynchronous persistence.
+            this.disk.putFileInDir(currentDir,name,new Uint8Array(0)).then(()=>renderVDiskList());
             this.dosOpen(f,{name,fullPath:this.disk.resolvePath(currentDir,name),data:new Uint8Array(0)},true);
             return true;
           }
@@ -1249,10 +1524,38 @@
         for(let i=0;i<Math.min(str.length,max-1);i++)this.dosPut8(ptr+i,str.charCodeAt(i));
         this.dosPut8(ptr+Math.min(str.length,max-1),0);
       }
-      dos2Error(code) {this.a=code&255;if(this.a)this.dos2LastError=this.a;return true;}
-      dos2Path(ptr) {if(this.dosGet8(ptr)===0xFF){return this.dos2FibPaths?.get(ptr)||null;}let n=this.dos2ReadString(ptr).replace(/^A:/i,'');return this.disk.resolvePath(currentDir,n);}
+      dos2Error(code) {
+        this.a=code&255;
+        if(this.a){
+          this.dos2LastError=this.a;
+          this.diagnostic("BDOS-ERROR", "C="+this.diagHex(this.c,2)+" ERR="+this.diagHex(this.a,2)+" B="+this.diagHex(this.b,2)+" DE="+this.diagHex(this.getDE())+" HL="+this.diagHex(this.getHL()),this.bdosCallPC);
+        }
+        return true;
+      }
+      // Resolve a DOS2 pathname relative to the selected drive's current directory.
+      // Only drive A is mounted. Invalid or unavailable drives never fall back to A.
+      dos2Path(ptr) {
+        if(this.dosGet8(ptr)===0xFF)return this.dos2FibPaths.get(ptr)||null;
+        const raw=this.dos2ReadString(ptr);
+        const drive=/^([A-Za-z]):/.exec(raw);
+        if(drive&&drive[1].toUpperCase()!=='A')return null;
+        const name=drive?raw.slice(2):raw;
+        return this.disk.resolvePath(currentDir,name);
+      }
+      dos2ParentExists(path) {
+        if(!path||path==='/')return false;
+        const index=path.lastIndexOf('/');
+        const parent=index<=0?'/':path.slice(0,index);
+        return parent==='/'||this.disk.getEntry(parent)?.isDir===true;
+      }
+      dos2SourcePath(ptr,filenamePtr) {
+        if(this.dosGet8(ptr)!==0xFF)return this.dos2Path(ptr);
+        const directory=this.dos2FibPaths.get(ptr);
+        if(!directory||!this.disk.getEntry(directory)?.isDir)return null;
+        return this.disk.resolvePath(directory,this.dos2ReadString(filenamePtr));
+      }
       dos2Handle(h) {return this.dos2Handles.get(h)||null;}
-      dos2Slot() {for(let i=5;i<64;i++)if(!this.dos2Handles.has(i))return i;return -1;}
+      dos2Slot() {for(let i=6;i<64;i++)if(!this.dos2Handles.has(i))return i;return -1;}
       dos2Persist(file) {
         if(!file||!file.dirty||!file.path)return;
         file.dirty=false;
@@ -1282,7 +1585,7 @@
       dos2SearchNext(ptr) {
         const state=this.dos2Searches.get(ptr);
         if(!state||state.index>=state.matches.length)return this.dos2Error(0xD7);
-        this.dos2Fib(ptr,state.matches[state.index++]);return this.dos2Error(0);
+        const match=state.matches[state.index++];this.dos2Fib(ptr,match);this.dos2WholePath=match.fullPath;return this.dos2Error(0);
       }
       dos2Call(fn) {
         const pathFn=()=>this.dos2Path(this.getDE());
@@ -1291,8 +1594,11 @@
         switch(fn) {
           case 0x40: case 0x41: { // FFIRST/FNEXT, FIB is 64 bytes
             if(fn===0x41)return this.dos2SearchNext(this.ix);
-            const raw=this.dos2ReadString(this.getDE());const full=pathFn();
+            const ptr=this.getDE(),raw=this.dosGet8(ptr)===0xFF?this.dos2ReadString(this.getHL()):this.dos2ReadString(ptr);
+            const full=this.dos2SourcePath(ptr,this.getHL());
+            if(!full)return this.dos2Error(0xD5);
             const slash=full.lastIndexOf('/'),dir=full.slice(0,slash)||'/',pat=raw.endsWith('/')||raw.endsWith('\\')?'*.*':full.slice(slash+1)||'*.*';
+            if(dir!=='/'&&!this.disk.getEntry(dir)?.isDir)return this.dos2Error(0xD5);
             const mask=this.disk.toFcbMask(pat),attrs=this.b;
             const matches=this.disk.getEntriesInDir(dir).filter(e=>{
               const a=e.attrs??(e.isDir?0x10:0x20);
@@ -1301,17 +1607,21 @@
             this.dos2Searches.set(this.ix,{matches,index:0});return this.dos2SearchNext(this.ix);
           }
           case 0x42: { // FNEW: create file or directory and return FIB
-            path=pathFn();const existing=this.disk.getEntry(path);
+            path=this.dos2SourcePath(this.getDE(),this.getHL());
+            if(!this.dos2ParentExists(path))return this.dos2Error(0xD5);
+            const existing=this.disk.getEntry(path);
             if(existing&&(this.b&0x80))return this.dos2Error(0xCB);
             if(!path||path==='/'||path.includes('*')||path.includes('?'))return this.dos2Error(0xDA);
             if(!existing){if(this.b&0x10)this.disk.createDir(path);else {
               const pp=path.split('/').filter(Boolean),name=pp.pop();this.disk.putFileInDir('/'+pp.join('/'),name,new Uint8Array(0));
             }}
             entry=this.disk.getEntry(path);if(!entry)return this.dos2Error(0xD7);
-            this.dos2Fib(this.ix,entry);renderVDiskList();return ok();
+            this.dos2Fib(this.ix,entry);this.dos2WholePath=entry.fullPath;renderVDiskList();return ok();
           }
           case 0x43: case 0x44: { // OPEN / CREATE: B=new handle
-            mode=this.a; path=pathFn(); entry=this.disk.getEntry(path);
+            mode=this.a; path=pathFn(); entry=path?this.disk.getEntry(path):null;
+            if(fn===0x43) this.onTrace(`[FILE-OPEN DOS2] NAME="${this.dos2ReadString(this.getDE())}" PATH=${path??'INVALID'} MODE=${this.diagHex(mode,2)} FOUND=${entry?entry.fullPath:'NONE'}`);
+            if(!this.dos2ParentExists(path))return this.dos2Error(0xD5);
             if(fn===0x43 && (!entry||entry.isDir))return this.dos2Error(0xD7);
             if(fn===0x44 && (!path||path==='/'||this.disk.getEntry(path)?.isDir))return this.dos2Error(0xD8);
             if(fn===0x44 && (this.b&0x80) && entry)return this.dos2Error(0xCB);
@@ -1323,7 +1633,7 @@
             return ok();
           }
           case 0x45: case 0x46: { // CLOSE / ENSURE
-            if(h<5)return ok();if(!f)return fail();
+            if(h<6)return ok();if(!f)return fail();
             this.dos2Persist(f);if(fn===0x45)this.dos2Handles.delete(h);return ok();
           }
           case 0x47: { // DUP: share the file pointer/buffer object
@@ -1355,13 +1665,25 @@
             if(!Number.isFinite(pos)||pos<0||pos>0xFFFFFFFF)return this.dos2Error(0xB8);
             f.pos=pos;this.setDE(Math.floor(pos/65536));this.setHL(pos&65535);return ok();
           }
-          case 0x4B: { // IOCTL, limited to virtual disk handles and screen devices
-            if(!f&&h>4)return fail();
-            const sub=this.a;
-            if(sub===0){const eof=f&&f.pos>=f.buffer.length?0x40:0;this.setDE(f?eof:(0xA0|(h===0?1:2)));return ok();}
-            if(sub===1)return f?this.dos2Error(0xB8):ok();
-            if(sub===2||sub===3){this.e=sub===3?255:(f?(f.pos<f.buffer.length?255:0):(this.dosInput.length?255:0));return ok();}
-            if(sub===4){this.d=f?0:25;this.e=f?0:80;return ok();}
+          case 0x4B: { // IOCTL: MSX-DOS 2 device/disk status and modes
+            if(!f&&h>5)return fail();
+            const sub=this.a, device=!f;
+            if(sub===0){
+              if(!device){this.setDE(f.pos>=f.buffer.length?0x40:0);return ok();}
+              const ascii=this.dos2DeviceModes.get(h)??true;
+              const flags=0x80|(ascii?0x20:0)|(h===0?1:(h===1||h===2?2:0));
+              this.setDE(flags);return ok();
+            }
+            if(sub===1){
+              if(!device)return this.dos2Error(0xB8);
+              this.dos2DeviceModes.set(h,(this.e&0x20)!==0);return ok();
+            }
+            if(sub===2||sub===3){
+              const ready=sub===3?(device?(h===0?0:255):255):
+                (device?(h===0&&this.dosInput.length?255:0):(f.pos<f.buffer.length?255:0));
+              this.e=ready;return ok();
+            }
+            if(sub===4){this.d=device&&(h===0||h===1||h===2)?25:0;this.e=device&&(h===0||h===1||h===2)?80:0;return ok();}
             return this.dos2Error(0xB8);
           }
           case 0x4C: {if(!f)return fail();this.b=(f.path===pathFn())?255:0;return ok();}
@@ -1373,7 +1695,7 @@
             this.disk.deleteEntry(path);renderVDiskList();return ok();
           }
           case 0x4E: case 0x4F: { // RENAME / MOVE
-            path=pathFn();entry=this.disk.getEntry(path);if(!entry)return this.dos2Error(0xD7);
+            path=pathFn();entry=path?this.disk.getEntry(path):null;if(!entry)return this.dos2Error(0xD7);
             if([...this.dos2Handles.values()].some(x=>x.path===path))return this.dos2Error(0xCA);
             const target=this.dos2ReadString(this.getHL());
             if(fn===0x4E && (target.includes('/')||target.includes('\\')||target.includes(':')))return this.dos2Error(0xDA);
@@ -1442,18 +1764,19 @@
             this.d=flag|(/[\\/:;=,+<>|"?* ]/.test(ch)?16:0);return ok();
           }
           case 0x5E: { // Whole path after preceding find
-            const path=this.dos2FibPaths.get(this.ix);
+            const path=this.dos2WholePath;
             if(!path)return this.dos2Error(0xD7);
             const text=path.slice(1).replace(/\//g,'\\');this.dos2WriteString(this.getDE(),text,64);
             this.setHL(this.getDE()+text.lastIndexOf('\\')+1);return ok();
           }
           case 0x59: { // GETCD: root is empty string; no initial slash
             if(this.b>1)return this.dos2Error(0xB5);
+            if(currentDir!=='/'&&!this.disk.getEntry(currentDir)?.isDir)currentDir='/';
             this.dos2WriteString(this.getDE(),currentDir==='/'?'':currentDir.slice(1).replace(/\//g,'\\'));return ok();
           }
           case 0x5A: { // CHDIR
-            path=pathFn();entry=this.disk.getEntry(path);
-            if(path!=='/'&&(!entry||!entry.isDir))return this.dos2Error(0xD5);
+            path=pathFn();entry=path?this.disk.getEntry(path):null;
+            if(!path||(path!=='/'&&(!entry||!entry.isDir)))return this.dos2Error(0xD5);
             currentDir=path;this.term.setPrompt(getPromptStr());return ok();
           }
           case 0x5F: return this.b===0||this.b===1||this.b===255?ok():this.dos2Error(0xB5);
@@ -1493,15 +1816,103 @@
           }
           case 0x6F: this.setBC(0x0220);this.setDE(0x0220);return ok();
           default: // Explicitly unsupported, never report false success.
+            this.diagnostic("BDOS-UNSUPPORTED", "C="+this.diagHex(fn,2)+" A="+this.diagHex(this.a,2)+" BC="+this.diagHex(this.getBC())+" DE="+this.diagHex(this.getDE())+" HL="+this.diagHex(this.getHL()), this.bdosCallPC);
             return this.dos2Error(0xFF);
         }
       }
 
+      // Trace every BDOS call, including calls handled successfully by the VM.
+      traceBdosFcb(ptr) {
+        const p = ptr & 65535;
+        const bytes = Array.from({length: 36}, (_,i) => this.memory[(p+i)&65535]);
+        const fmt = bytes.map(b => b.toString(16).toUpperCase().padStart(2,'0')).join(' ');
+        const name = bytes.slice(1,9).concat(bytes.slice(9,12)).map(b => b>=32&&b<=126?String.fromCharCode(b):'.').join('');
+        return `FCB@${this.diagHex(p)} DR=${this.diagHex(bytes[0],2)} NAME="${name}" RAW=${fmt}`;
+      }
+      traceBdosText(ptr, max=100) {
+        const p = ptr & 65535;
+        let out = '';
+        for (let i=0;i<max;i++) {
+          const b = this.memory[(p+i)&65535];
+          if (b === 0 || b === 13) break;
+          out += b >= 32 && b < 127 ? String.fromCharCode(b) : `\\x${b.toString(16).toUpperCase().padStart(2,'0')}`;
+        }
+        return out;
+      }
       handleBDOS() {
         const fn = this.c;
-        if (fn >= 0x40 && fn <= 0x70) { this.dos2Call(fn); return; }
+        const callSite = this.memory[this.sp] | (this.memory[(this.sp+1)&65535] << 8);
+        const caller = (callSite - 3) & 65535;
+        const h = v => this.diagHex(v);
+        const h8 = v => this.diagHex(v,2);
+        const de = this.getDE();
+        const callSubfunction = this.a;
+        // Preserve the recent guest instructions before an output-file HDELETE.
+        if (fn === 0x52 && this.b === this.cfTcoHandle && this.cfTcoHistory.length) {
+          this.onTrace(`[TCO-BEFORE-HDELETE] Handle=${h8(this.b)} Last ${this.cfTcoHistory.length} CPU instructions (oldest first):`);
+          for (const line of this.cfTcoHistory) this.onTrace(line);
+          this.onTrace(`[TCO-BEFORE-HDELETE-END]`);
+          this.cfTcoHistory = [];
+        }
+        const start = `C=${h8(fn)} CALLER=${h(caller)} ENTRY=${h(this.bdosCallPC)} A=${h8(this.a)} B=${h8(this.b)} DE=${h(de)} HL=${h(this.getHL())} SP=${h(this.sp)}`;
+        let extra = '';
+        if ([0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x20,0x21,0x22,0x23,0x24,0x27,0x28].includes(fn))
+          extra = ' ' + this.traceBdosFcb(de);
+        else if ([0x40,0x42,0x43,0x44,0x4D,0x4E,0x4F,0x50,0x59,0x5A,0x5B,0x5C,0x5D].includes(fn))
+          extra = ' PATH="' + this.traceBdosText(de) + '"';
+        else if (fn===0x09) extra = ' TEXT="' + this.traceBdosText(de,80) + '"';
+        // Probe Z80ASM source reads without changing guest registers, flags or memory.
+        // Trace all eight BDOS returns, not only the eighth, to locate the first wrong branch.
+        const traceRead = this.z80asmProbe && fn === 0x14;
+        if (traceRead) this.z80asmReadCount++;
+        const readNumber = this.z80asmReadCount;
+        const readDMA = this.dta;
+        const readRecord = traceRead ? this.memory[(de+32)&65535] : 0;
+        const callId = ++this.bdosTraceCount;
+        this.onTrace(`[BDOS ${callId} IN] ${start}${extra}`);
+        try { return this.handleBDOSCore(); }
+        finally {
+          this.onTrace(`[BDOS ${callId} OUT] C=${h8(fn)} A=${h8(this.a)} B=${h8(this.b)} DE=${h(this.getDE())} HL=${h(this.getHL())} CY=${this.flags.cy} HALT=${this.halted?1:0}`);
+          if (fn === 0x44 && this.a === 0 && this.traceBdosText(de).toLowerCase().endsWith('.tco')) {
+            this.cfTcoHandle = this.b;
+            this.cfTcoHistory = [];
+            this.onTrace(`[TCO-CREATE-TRACE] Armed rolling CPU history for handle=${h8(this.b)}`);
+          }
+          if (fn === 0x43 && this.a === 0) {
+            this.cfOpenTraceRemaining = 160;
+            this.onTrace(`[OPEN-FOLLOW] Begin 160-instruction CPU trace after OPEN handle=${h8(this.b)}`);
+          }
+          // Follow the first output-file IOCTL to identify why CF discards its handle.
+          if (fn === 0x4B && this.b >= 6 && !this.cfIoctlTraceStarted) {
+            this.cfIoctlTraceStarted = true;
+            this.cfOpenTraceRemaining = 320;
+            this.onTrace(`[TCO-IOCTL-FOLLOW] Begin 320-instruction CPU trace: handle=${h8(this.b)} sub=${h8(callSubfunction)} resultA=${h8(this.a)} resultDE=${h(this.getDE())}`);
+          }
+          if ((fn === 0x52 || (fn === 0x49 && this.a !== 0)) && this.b >= 6) {
+            this.onTrace(`[TCO-HANDLE] fn=${h8(fn)} handle=${h8(this.b)} result=${h8(this.a)} exists=${this.dos2Handles.has(this.b)?1:0}`);
+          }
+          if (traceRead) {
+            const sample = Array.from({length:24},(_,i)=>h8(this.memory[(readDMA+i)&65535])).join(' ');
+            const ret = this.memory[this.sp] | (this.memory[(this.sp+1)&65535]<<8);
+            this.onTrace(`[Z80ASM-READ ${readNumber}] CALL=${h(caller)} RETURN=${h(ret)} RECORD=${readRecord} NEXT=${this.memory[(de+32)&65535]} DMA=${h(readDMA)} DATA=${sample} A=${h8(this.a)} F=${h8(this.getPSW())} BC=${h(this.getBC())} HL=${h(this.getHL())}`);
+            this.z80asmAfterRead = readNumber === 1 ? 40 : readNumber === 8 ? 80 : 12;
+          }
+        }
+      }
+      handleBDOSCore() {
+        const fn = this.c;
+        if (fn >= 0x40 && fn <= 0x70) {
+          this.dos2Call(fn);
+          // MSX-DOS 2 returns after OR A: callers use Z/NZ to test A (error code).
+          this.setSZP(this.a);
+          this.flags.ac = 0;
+          this.flags.n = 0;
+          this.flags.cy = 0;
+          return;
+        }
         if (fn <= 0x30 && this.dos1(fn)) return;
         if (fn <= 0x30 && fn !== 0x02 && fn !== 0x09) { // Keep legacy CP/M character and string output
+          this.diagnostic("BDOS-UNSUPPORTED", "C="+this.diagHex(fn,2)+" DE="+this.diagHex(this.getDE()), this.bdosCallPC);
           this.a = 0xFF; return;
         }
         switch (fn) {
@@ -1919,13 +2330,104 @@
           }
 //
 
-          default: this.a = 0xFF; break;
+          default: this.diagnostic("BDOS-UNSUPPORTED", "C="+this.diagHex(fn,2)+" DE="+this.diagHex(this.getDE()), this.bdosCallPC);this.a = 0xFF; break;
         }
       }
 
+      z80asmTraceStep() {
+        const pc = this.pc & 65535;
+        const hex = (x,n=2) => (x>>>0).toString(16).toUpperCase().padStart(n,'0');
+        const op = Array.from({length: 5},(_,i)=>hex(this.memory[(pc+i)&65535])).join(' ');
+        const stack = Array.from({length: 4},(_,i)=>hex(this.memory[(this.sp+i)&65535])).join(' ');
+        const line = `[Z80ASM-CPU] PC=${hex(pc,4)} OP=${op} AF=${hex(this.a)}:${this.flags.s}${this.flags.z}${this.flags.ac}${this.flags.p}${this.flags.n}${this.flags.cy} BC=${hex(this.getBC(),4)} DE=${hex(this.getDE(),4)} HL=${hex(this.getHL(),4)} SP=${hex(this.sp,4)} STACK=${stack}`;
+        this.z80asmHistory.push(line);
+        if(this.z80asmHistory.length>1200)this.z80asmHistory.shift();
+        // Observe the parser's BIT 6,(HL) and subsequent RET Z without changing CPU state.
+        // These snapshots are taken BEFORE executing the instruction.
+        if (pc === 0x0E23 || pc === 0x0E26 || pc === 0x356A || pc === 0x357D) {
+          const addr = this.getHL();
+          const value = this.memory[addr];
+          const f = this.getPSW() & 255;
+          const entry = `[Z80ASM-BIT-PATH] STEP=${this.totalCycles} PC=${hex(pc,4)} OP=${op} A=${hex(this.a)} F=${hex(f)} Z=${this.flags.z} HL=${hex(addr,4)} MHL=${hex(value)} BIT6=${(value>>6)&1} C=${hex(this.c)} M65DB=${hex(this.memory[0x65DB])}`;
+          this.z80asmBitCheckLog.push(entry);
+          if (this.z80asmBitCheckLog.length > 400) this.z80asmBitCheckLog.shift();
+        }
+        // Snapshot the actual exit call path, without treating character parsing as an error.
+        if (!this.z80asmExitPathLogged && this.z80asmReadCount === 8 && pc === 0x62F7) {
+          this.z80asmExitPathLogged = true;
+          const mem = addr => hex(this.memory[addr & 65535]);
+          // Keep the snapshot out of addTrace's 80,000-character rolling window.
+          // Render it once, after the program has halted, so its header cannot be discarded.
+          this.z80asmExitPathDump = [
+            `[Z80ASM-EXIT-PATH] PC=${hex(pc,4)} AF=${hex(this.getPSW(),4)} BC=${hex(this.getBC(),4)} DE=${hex(this.getDE(),4)} HL=${hex(this.getHL(),4)} M65DB=${mem(0x65DB)} M63D8=${mem(0x63D8)}`,
+            '[Z80ASM-EXIT-PATH] Prior 800 instructions (chronological):',
+            ...this.z80asmHistory.slice(-800)
+          ].join('\n');
+        }
+        if(this.z80asmAfterRead>0) {
+          this.z80asmAfterRead--;
+          this.onTrace(`[Z80ASM-POSTREAD ${this.z80asmReadCount}] ${line.slice(13)}`);
+        }
+      }
       step() {
         if (this.halted) return false;
+        if (this.z80asmProbe) this.z80asmTraceStep();
+        if (this.cfTcoHandle !== null) {
+          const pc = this.pc & 65535;
+          const bytes = Array.from({length:4},(_,i)=>this.diagHex(this.memory[(pc+i)&65535],2)).join(' ');
+          this.cfTcoHistory.push(`[TCO-PRE] PC=${this.diagHex(pc)} OP=${bytes} AF=${this.diagHex(this.getPSW())} BC=${this.diagHex(this.getBC())} DE=${this.diagHex(this.getDE())} HL=${this.diagHex(this.getHL())} SP=${this.diagHex(this.sp)} IX=${this.diagHex(this.ix)} IY=${this.diagHex(this.iy)}`);
+          if (this.cfTcoHistory.length > 600) this.cfTcoHistory.shift();
+        }
+        if (this.cfOpenTraceRemaining > 0) {
+          const pc = this.pc & 65535;
+          const bytes = Array.from({length:4},(_,i)=>this.diagHex(this.memory[(pc+i)&65535],2)).join(" ");
+          this.onTrace(`[OPEN-CPU ${161-this.cfOpenTraceRemaining}] PC=${this.diagHex(pc)} OP=${bytes} AF=${this.diagHex(this.getPSW())} BC=${this.diagHex(this.getBC())} DE=${this.diagHex(this.getDE())} HL=${this.diagHex(this.getHL())} SP=${this.diagHex(this.sp)} IX=${this.diagHex(this.ix)} IY=${this.diagHex(this.iy)}`);
+          this.cfOpenTraceRemaining--;
+        }
+        this.diagnosticLastPC = this.pc;
+        // Observe guest entries only; no BIOS/mapper hardware is emulated by this trace.
+        const biosNames={0x000C:'RDSLT',0x0014:'WRSLT',0x001C:'CALSLT',0x0024:'ENASLT',0x0030:'CALLF',0x0080:'BIOS-TABLE'};
+        if (this.pc in biosNames) {
+          const returnPC = this.memory[this.sp & 65535] | (this.memory[(this.sp + 1) & 65535] << 8);
+          this.traceHardware('BIOS', `ENTRY=${biosNames[this.pc]} SP=${this.diagHex(this.sp)} STACK-RETURN=${this.diagHex(returnPC)} AF=${this.diagHex(this.getPSW())} BC=${this.diagHex(this.getBC())} DE=${this.diagHex(this.getDE())} HL=${this.diagHex(this.getHL())} IX=${this.diagHex(this.ix)} IY=${this.diagHex(this.iy)}`);
+        }
+        if (this.pc===0xFFCA) this.traceHardware('EXTBIO', `ENTRY=FFCA AF=${this.diagHex(this.getPSW())} DE=${this.diagHex(this.getDE())} HL=${this.diagHex(this.getHL())} SP=${this.diagHex(this.sp)}`);
+        // Trace the instruction that targets CALSLT, not just arrival at 001Ch.
+        const tracePC = this.pc & 65535;
+        const traceOp = this.memory[tracePC];
+        const traceTarget = this.memory[(tracePC + 1) & 65535] | (this.memory[(tracePC + 2) & 65535] << 8);
+        const isCall = traceOp===0xCD || [0xC4,0xCC,0xD4,0xDC,0xE4,0xEC,0xF4,0xFC].includes(traceOp);
+        const isJump = traceOp===0xC3 || [0xC2,0xCA,0xD2,0xDA,0xE2,0xEA,0xF2,0xFA].includes(traceOp);
+        if ((isCall || isJump) && (traceTarget===0x001C || traceTarget===0x0030 || traceTarget===0xFFCA)) {
+          const name = traceTarget===0x001C ? 'CALSLT' : traceTarget===0x0030 ? 'CALLF' : 'EXTBIO';
+          this.traceHardware('BIOS-TARGET', `OP=${this.diagHex(traceOp,2)} TYPE=${isCall?'CALL':'JP'} TARGET=${name}(${this.diagHex(traceTarget)}) CONDITIONAL=${traceOp!==0xCD&&traceOp!==0xC3?1:0} SP=${this.diagHex(this.sp)} IX=${this.diagHex(this.ix)} IY=${this.diagHex(this.iy)}`, tracePC);
+        }
+        // Trace direct reads of the extended BIOS availability flag.
+        if ((traceOp===0x3A || traceOp===0x2A || traceOp===0x21) && traceTarget===0xFB20 && traceOp!==0x21)
+          this.traceHardware('EXTBIOS-FLAG', `OP=${this.diagHex(traceOp,2)} ADDR=FB20 VALUE=${this.diagHex(this.memory[0xFB20],2)} BIT0=${this.memory[0xFB20]&1}`, tracePC);
+        if(this.pc<0x0100 && this.pc!==0x0000 && this.pc!==0x0005)
+          this.diagnostic("EXEC-LOW", "Execution below 0100h", this.pc);
+        if(this.pc>=0xF000 && this.pc!==0xF000 && this.pc!==0xF001)
+          this.diagnostic("EXEC-HIGH", "Execution at or above F000h", this.pc);
 
+        if(this.mapperCallFrames.length) {
+          const f=this.mapperCallFrames[this.mapperCallFrames.length-1];
+          if(this.pc===f.ret && this.sp===f.sp){
+            this.setMapperPage(f.page,f.segment);
+            this.mapperCallFrames.pop();
+          }
+        }
+        if(this.slotCallFrames.length) {
+          const f=this.slotCallFrames[this.slotCallFrames.length-1];
+          if(this.pc===f.ret && this.sp===f.sp){this.setPrimarySlots(f.slots);this.slotCallFrames.pop();}
+        }
+        if(this.pc===0xFFCA){this.handleExtendedBIOS();return true;}
+        if(this.pc>=this.mapperJumps && this.pc<this.mapperJumps+0x30 && (this.pc-this.mapperJumps)%3===0){
+          this.handleMapperSupport((this.pc-this.mapperJumps)/3);return true;
+        }
+        if([0x000C,0x0014,0x001C,0x0024,0x0030].includes(this.pc)){
+          this.handleSlotBIOS();return true;
+        }
         // RET to 0000H means return to DOS, not execute a HALT instruction.
         // Keep registers and memory intact; prepare PC for the next COM program.
         if (this.pc === 0x0000) {
@@ -1935,6 +2437,7 @@
         }
 
         if (this.pc === 0xF000 || this.pc === 0x0005) {
+          this.bdosCallPC = this.pc;
           this.handleBDOS();
           if (this.halted || this.dosWaiting !== null) return false;
           if (this.pc === 0x0005) {
@@ -1944,6 +2447,20 @@
         }
 
         const op = this.memory[this.pc];
+        // Detect direct slot-register writes even though the VM currently uses a flat 64KB array.
+        if ((op===0x32 && this.memory[(this.pc+1)&65535]===0xFF && this.memory[(this.pc+2)&65535]===0xFF) ||
+            (op===0x77 && this.getHL()===0xFFFF) ||
+            (op===0x02 && this.getBC()===0xFFFF) || (op===0x12 && this.getDE()===0xFFFF))
+          this.traceHardware('SLOT-WRITE', `ADDR=FFFF VALUE=${this.diagHex(this.a,2)} OP=${this.diagHex(op,2)}`);
+        if(op===0x32 && this.memory[(this.pc+1)&65535]===0xFF && this.memory[(this.pc+2)&65535]===0xFF) {
+          this.secondarySlots=this.a&255;
+          this.traceHardware('SECONDARY-SLOT',`WRITE=${this.diagHex(this.secondarySlots,2)}`);
+          this.pc=(this.pc+3)&65535;this.totalCycles++;return true;
+        }
+        if(op===0x3A && this.memory[(this.pc+1)&65535]===0xFF && this.memory[(this.pc+2)&65535]===0xFF) {
+          this.a=(~this.secondarySlots)&255;
+          this.pc=(this.pc+3)&65535;this.totalCycles++;return true;
+        }
         this.pc = (this.pc + 1) & 0xFFFF;
         this.totalCycles++;
 
@@ -1969,6 +2486,7 @@
               this.flags.cy = (res > 0xFFFF) ? 1 : 0;
               this.flags.ac = (((hl & 0x0FFF) + (val & 0x0FFF)) > 0x0FFF) ? 1 : 0;
               this.flags.n = 0;
+              this.zSet35((res >> 8) & 0xFF);
               this.setHL(res & 0xFFFF);
             }
           }
@@ -2031,25 +2549,25 @@
               case 0: {
                 const cy = (this.a >> 7) & 1;
                 this.a = ((this.a << 1) | cy) & 0xFF;
-                this.flags.cy = cy;
+                this.flags.cy = cy;this.flags.ac=0;this.flags.n=0;this.zSet35(this.a);
                 break;
               }
               case 1: {
                 const cy = this.a & 1;
                 this.a = (this.a >> 1) | (cy << 7);
-                this.flags.cy = cy;
+                this.flags.cy = cy;this.flags.ac=0;this.flags.n=0;this.zSet35(this.a);
                 break;
               }
               case 2: {
                 const cy = (this.a >> 7) & 1;
                 this.a = ((this.a << 1) | this.flags.cy) & 0xFF;
-                this.flags.cy = cy;
+                this.flags.cy = cy;this.flags.ac=0;this.flags.n=0;this.zSet35(this.a);
                 break;
               }
               case 3: {
                 const cy = this.a & 1;
                 this.a = (this.a >> 1) | (this.flags.cy << 7);
-                this.flags.cy = cy;
+                this.flags.cy = cy;this.flags.ac=0;this.flags.n=0;this.zSet35(this.a);
                 break;
               }
               case 4: { // DAA (Z80/R800: N distinguishes decimal add/subtract)
@@ -2072,9 +2590,9 @@
                 this.setSZP(this.a); // Parity after DAA, not arithmetic overflow
                 break;
               }
-              case 5: this.a = (~this.a) & 0xFF; this.flags.ac = 1; this.flags.n = 1; break;
-              case 6: this.flags.cy = 1; this.flags.ac = 0; this.flags.n = 0; break;
-              case 7: this.flags.ac = this.flags.cy; this.flags.cy ^= 1; this.flags.n = 0; break;
+              case 5: this.a = (~this.a) & 0xFF; this.flags.ac = 1; this.flags.n = 1; this.zSet35(this.a); break;
+              case 6: this.flags.cy = 1; this.flags.ac = 0; this.flags.n = 0; this.zSet35(this.a); break;
+              case 7: this.flags.ac = this.flags.cy; this.flags.cy ^= 1; this.flags.n = 0; this.zSet35(this.a); break;
             }
           }
         }
@@ -2174,7 +2692,7 @@
             }
           }
           else if (z === 7) {
-            if (op === 0xD7) this.handleBDOS();
+            if (op === 0xD7) {this.bdosCallPC=(this.pc-1)&65535;this.handleBDOS();}
             else {
               this.push16(this.pc);
               this.pc = y * 8;
@@ -2245,7 +2763,30 @@
     const dropZone = document.getElementById("dropZone");
     const traceEl = document.getElementById("traceLog");
 
-    function addTrace(msg) { traceEl.textContent = msg + "\n" + traceEl.textContent.slice(0, 300); }
+    async function copyTraceLog() {
+      const content = traceEl.textContent;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(content);
+          return;
+        }
+      } catch (_) { /* Fall back for file: URLs or denied permissions. */ }
+      const tmp = document.createElement("textarea");
+      tmp.value = content;
+      tmp.setAttribute("readonly", "");
+      tmp.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;";
+      document.body.appendChild(tmp);
+      tmp.focus();
+      tmp.select();
+      const copied = document.execCommand("copy");
+      tmp.remove();
+      if (!copied) alert("Unable to copy log. Check clipboard permissions.");
+    }
+
+    function addTrace(msg) {
+      console.debug(msg);
+      traceEl.textContent = msg + "\n" + traceEl.textContent.slice(0, 80000);
+    }
 
     const terminal = new TerminalManager(termScreen, termText, termCursor);
     const vDisk = new PersistentVirtualDisk();
@@ -2290,7 +2831,7 @@
       terminal.print(`\r\n[Importing ${files.length} file(s) into ${currentDir}]\r\n`);
       for (const file of files) {
         const data = new Uint8Array(await file.arrayBuffer());
-        await vDisk.putFileInDir(currentDir, file.name, data);
+        await vDisk.putFileInDir(currentDir, file.name, data, file.lastModified);
         terminal.print(`  + ${file.name.toUpperCase()} (${data.length} bytes)\r\n`);
       }
       renderVDiskList();
@@ -2541,8 +3082,8 @@
       vi.command.style.display='none';vi.mode='NORMAL';
       if(wasSearch){viSearch(input.slice(1),input.startsWith('?'));vi.area.focus();return;}
       const command=input.toLowerCase();
-      if(command===':w'||command===':wq'){
-        const ok=await viSave();if(ok&&command===':wq'){viClose();terminal.showPrompt();return;}
+      if(command===':w'||command===':wq'||command===':wq!'){
+        const ok=await viSave();if(ok&&(command===':wq'||command===':wq!')){viClose();terminal.showPrompt();return;}
       }else if(command===':q'||command===':q!'){
         if(vi.dirty&&command!==':q!')viInfo('No write since last change (use :q!)');
         else {viClose();terminal.showPrompt();return;}
@@ -2621,11 +3162,88 @@
       finally{bdscLoading=false;terminal.showPrompt();termScreen.focus();}
     }
 
+    // Intel HEX to raw binary: first stored address becomes output offset zero.
+    function intelHexToBinary(bytes) {
+      const lines = new TextDecoder("ascii").decode(bytes).replace(/^\uFEFF/, "").replace(/[\s\x1A]+$/g, "").split(/\r\n|\n|\r/);
+      const records = [];
+      let base = 0, min = Infinity, max = -1, eof = false;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const fail = msg => { throw new Error(`Line ${i + 1}: ${msg}`); };
+        if (eof) fail("data after EOF record");
+        if (!/^:[0-9a-fA-F]+$/.test(line) || (line.length - 1) % 2) fail("invalid Intel HEX record");
+        const v = [];
+        for (let p = 1; p < line.length; p += 2) v.push(parseInt(line.slice(p, p + 2), 16));
+        if (v.length < 5 || v.length !== v[0] + 5) fail("incorrect record length");
+        if ((v.reduce((a, b) => a + b, 0) & 255) !== 0) fail("checksum mismatch");
+        const count = v[0], addr = (v[1] << 8) | v[2], type = v[3];
+        if (type === 0) {
+          const start = base + addr, end = start + count;
+          if (end > 0x100000000) fail("address exceeds 32-bit range");
+          if (count) {
+            records.push({ start, data: v.slice(4, 4 + count) });
+            min = Math.min(min, start);
+            max = Math.max(max, end);
+          }
+        } else if (type === 1) {
+          if (count !== 0 || addr !== 0) fail("invalid EOF record");
+          eof = true;
+        } else if (type === 2 || type === 4) {
+          if (count !== 2 || addr !== 0) fail("invalid extended address record");
+          const value = (v[4] << 8) | v[5];
+          base = type === 2 ? value * 16 : value * 65536;
+        } else if (type === 3 || type === 5) {
+          if (count !== 4 || addr !== 0) fail("invalid start address record");
+        } else fail(`unsupported record type ${type.toString(16).toUpperCase().padStart(2, "0")}`);
+      }
+      if (!records.length) throw new Error("no data records");
+      const size = max - min;
+      if (size > 64 * 1024 * 1024) throw new Error("binary exceeds 64 MiB limit");
+      const output = new Uint8Array(size);
+      // Record order is respected if addresses overlap (last record wins).
+      for (const r of records) output.set(r.data, r.start - min);
+      return { output, start: min, end: max - 1 };
+    }
+
     terminal.onCommand = async (cmd) => {
       const raw = cmd.trim();
       const parts = raw.split(/\s+/).filter(p => p.length > 0);
       const name = (parts[0] || "").toUpperCase();
       if (!name) { terminal.showPrompt(); return; }
+
+      if (name === "IHEX2COM") {
+        if (parts.length !== 2 || /[*?]/.test(parts[1])) {
+          terminal.print("Usage: IHEX2COM filename[.HEX]\r\n");
+          terminal.showPrompt();return;
+        }
+        const suppliedPath = shellPath(parts[1]);
+        if (!suppliedPath) {
+          terminal.print("Invalid drive or path\r\n");terminal.showPrompt();return;
+        }
+        const loc = shellParent(suppliedPath);
+        const dot = loc.name.lastIndexOf(".");
+        const stem = dot > 0 ? loc.name.slice(0, dot) : loc.name;
+        const inputPath = dot > 0 ? suppliedPath : suppliedPath + ".HEX";
+        const input = vDisk.getEntry(inputPath);
+        if (!input || input.isDir) {
+          terminal.print("File not found\r\n");terminal.showPrompt();return;
+        }
+        const outputName = stem + ".COM";
+        const outputPath = (loc.dir === "/" ? "/" : loc.dir + "/") + outputName;
+        if (vDisk.getEntry(outputPath)?.isDir) {
+          terminal.print("Output path is a directory\r\n");terminal.showPrompt();return;
+        }
+        try {
+          const result = intelHexToBinary(input.data);
+          await vDisk.putFileInDir(loc.dir, outputName, result.output);
+          renderVDiskList();
+          terminal.print(`Created ${outputPath.replace(/\//g, "\\")} (${result.output.length} bytes, HEX ${result.start.toString(16).toUpperCase()}-${result.end.toString(16).toUpperCase()})\r\n`);
+        } catch (e) {
+          terminal.print("IHEX2COM: " + e.message + "\r\n");
+        }
+        terminal.showPrompt();return;
+      }
 
       if (name === "LOADBDSC") {
         await loadBDSC();return;
@@ -2641,6 +3259,61 @@
         }
         if(!viOpen(path))terminal.showPrompt();
         return;
+      }
+
+      // DUMP displays the original bytes without interpreting Ctrl-Z as EOF.
+      if (name === "DUMP") {
+        if (parts.length !== 2 || /[*?]/.test(parts[1])) {
+          terminal.print("Usage: DUMP filename\r\n");terminal.showPrompt();return;
+        }
+        const path = shellPath(parts[1]);
+        const file = path ? vDisk.getEntry(path) : null;
+        if (!file || file.isDir) {
+          terminal.print("File not found\r\n");terminal.showPrompt();return;
+        }
+        const data = file.data;
+        terminal.print("File dump\r\n");
+        for (let offset = 0; offset < data.length; offset += 16) {
+          const bytes = data.subarray(offset, offset + 16);
+          const hex = Array.from(bytes, x => x.toString(16).toUpperCase().padStart(2, "0")).join(" ").padEnd(47, " ");
+          const ascii = Array.from(bytes, x => x >= 0x20 && x <= 0x7E ? String.fromCharCode(x) : ".").join("");
+          terminal.print(offset.toString(16).toUpperCase().padStart(8, "0") + ":" + hex + "   " + ascii + "\r\n");
+        }
+        terminal.showPrompt();return;
+      }
+
+      // CR0D0A converts only a lone LF into CRLF, preserving existing CRLF.
+      if (name === "CR0D0A") {
+        if (parts.length !== 2 || /[*?]/.test(parts[1])) {
+          terminal.print("Usage: CR0D0A filename\r\n");terminal.showPrompt();return;
+        }
+        const path = shellPath(parts[1]);
+        const file = path ? vDisk.getEntry(path) : null;
+        if (!file || file.isDir) {
+          terminal.print("File not found\r\n");terminal.showPrompt();return;
+        }
+        const src = file.data;
+        let added = 0;
+        for (let i = 0; i < src.length; i++) {
+          if (src[i] === 0x0A && (i === 0 || src[i - 1] !== 0x0D)) added++;
+        }
+        if (added) {
+          const converted = new Uint8Array(src.length + added);
+          let out = 0;
+          for (let i = 0; i < src.length; i++) {
+            if (src[i] === 0x0A && (i === 0 || src[i - 1] !== 0x0D)) converted[out++] = 0x0D;
+            converted[out++] = src[i];
+          }
+          const parent = shellParent(path);
+          try {
+            await vDisk.putFileInDir(parent.dir, parent.name, converted);
+            renderVDiskList();
+          } catch (error) {
+            terminal.print("Write error: " + error.message + "\r\n");terminal.showPrompt();return;
+          }
+        }
+        terminal.print("Converted " + added + " LF line ending(s)\r\n");
+        terminal.showPrompt();return;
       }
 
       // DIR / LS: optional directory path or wildcard filename pattern.
@@ -2668,11 +3341,19 @@
         terminal.print(` Volume in drive A has no label\r\n Directory of A:${dosPath}\r\n\r\n`);
         let totalBytes = 0;
         for (const item of query.matches) {
+          // Legacy IndexedDB entries have no stored timestamp: do not fabricate one.
+          const stamp = Number.isFinite(item.modifiedAt)
+            ? (() => {
+                const d = new Date(item.modifiedAt);
+                const pad = n => String(n).padStart(2, "0");
+                return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+              })()
+            : "----/--/-- --:--";
           if (item.isDir) {
-            terminal.print(`${item.name.padEnd(14, " ")} <DIR>\r\n`);
+            terminal.print(`${stamp}  <DIR>       ${item.name}\r\n`);
           } else {
             const size = item.data ? item.data.length : 0;
-            terminal.print(`${item.name.padEnd(14, " ")} ${size.toString().padStart(8, " ")} bytes\r\n`);
+            terminal.print(`${stamp}  ${size.toString().padStart(10, " ")}  ${item.name}\r\n`);
             totalBytes += size;
           }
         }
@@ -2841,12 +3522,15 @@
           "  COPY src dst, CP src dst        Copy a file\r\n" +
           "  COPY CON filename               Create text file (^Z + Enter)\r\n" +
           "  TYPE filename                   Display text file\r\n" +
+          "  DUMP filename                   Hexadecimal file dump\r\n" +
+          "  CR0D0A filename                 Convert lone LF to CRLF in place\r\n" +
+          "  IHEX2COM filename[.HEX]         Convert Intel HEX to binary .COM\r\n" +
           "  DEL mask, ERASE mask            Delete files\r\n" +
           "  MD dir, MKDIR dir               Create directory\r\n" +
           "  CD [dir], CHDIR [dir]           Change/show directory\r\n" +
           "  RD dir, RMDIR dir               Remove empty directory\r\n" +
           "  DOWNLOAD filename               Save file to PC\r\n" +
-          "  VI filename                     Open text editor (:w :q :wq)\r\n" +
+          "  VI filename                     Open text editor (:w :q :wq :wq!)\r\n" +
           "  LOADBDSC                        Load BDS C from bdsc.js\r\n" +
           "  CLS                             Clear console\r\n" +
           "  HELP                            Show this list\r\n" +
@@ -2871,8 +3555,20 @@
       vm.reset();
       vm.load(0x0100, file.data);
       vm.setupCommandLine(rawTail, argParts[0], argParts[1]);
+      vm.z80asmProbe = file.displayName.toUpperCase() === 'Z80ASM.COM';
+      vm.z80asmHistory = [];
+      vm.z80asmErrorPathLogged = false;
+      vm.z80asmExitPathLogged = false;
+      vm.z80asmExitPathDump = null;
+      vm.z80asmBitCheckLog = [];
+      vm.z80asmAfterRead = 0;
+      vm.z80asmReadCount = 0;
       updateUI();
+      if (vm.z80asmProbe) vm.z80asmConsoleStart = terminal.buffer.length;
       addTrace(`Exec: ${file.displayName} with tail: "${rawTail}"`);
+      addTrace(`[CMDTAIL] @0080 LEN=${vm.memory[0x80]} TEXT="${Array.from(vm.memory.slice(0x81,0x81+vm.memory[0x80])).map(x=>x>=32&&x<127?String.fromCharCode(x):'\\x'+x.toString(16).padStart(2,'0')).join('')}"`);
+      addTrace(`[FCB1] ${vm.traceBdosFcb(0x5C)}`);
+      addTrace(`[FCB2] ${vm.traceBdosFcb(0x6C)}`);
 
       const MAX = 30000;
       function loop() {
@@ -2885,6 +3581,32 @@
         if (!vm.halted) {
           setTimeout(loop, vm.dosWaiting !== null ? 16 : 0);
         } else {
+          const hwEvents = vm.hardwareTraceEvents;
+          const hwKinds = {};
+          for (const event of hwEvents) {
+            const kind = event.match(/^\[HW-([^\]]+)/)?.[1] || 'UNKNOWN';
+            hwKinds[kind] = (hwKinds[kind] || 0) + 1;
+          }
+          addTrace(`[HW-SUMMARY] Events=${vm.hardwareTraceCount} Limit=${vm.hardwareTraceLimit} Kinds=${JSON.stringify(hwKinds)}${vm.hardwareTraceCount === vm.hardwareTraceLimit ? ' TRUNCATED=1' : ''}`);
+          for (const event of hwEvents) addTrace(`[HW-SAVED] ${event}`);
+          if (vm.z80asmProbe) {
+            const consoleText = terminal.buffer.slice(vm.z80asmConsoleStart || 0);
+            const escapedConsole = JSON.stringify(consoleText.slice(-16000));
+            addTrace(`[Z80ASM-CONSOLE] ${escapedConsole}`);
+            addTrace(`[Z80ASM-EXIT] PC=${vm.diagHex(vm.pc)} READS=${vm.z80asmReadCount} STEPS=${vm.totalCycles}`);
+            addTrace('[Z80ASM-EXIT] Last 160 instructions (chronological):');
+            for (const line of vm.z80asmHistory.slice(-160)) addTrace(line);
+            if (vm.z80asmExitPathDump) {
+              // Preserve the full captured snapshot as the newest visible block.
+              const bitPath = [
+                `[Z80ASM-BIT-PATH] Last ${vm.z80asmBitCheckLog.length} parser checkpoints (chronological):`,
+                ...vm.z80asmBitCheckLog
+              ].join("\n");
+              traceEl.textContent = `[Z80ASM-CONSOLE] ${JSON.stringify(terminal.buffer.slice(vm.z80asmConsoleStart || 0).slice(-16000))}\n` + bitPath + "\n" + vm.z80asmExitPathDump + "\n" + traceEl.textContent.slice(0, 80000);
+            } else if (vm.z80asmReadCount === 8) {
+              addTrace('[Z80ASM-EXIT-PATH] NOT CAPTURED: PC=62F7 was not reached with READS=8');
+            }
+          }
           comProgramActive = false;
           terminal.print("\r\n");
           terminal.showPrompt();
